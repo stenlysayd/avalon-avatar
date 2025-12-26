@@ -8,7 +8,7 @@ export async function POST(req: Request) {
     
     // API KEY (Pastikan sudah diisi/pakai env)
     // Gunakan process.env.GEMINI_API_KEY jika sudah fix, atau hardcode key baru Anda di sini
-    const apiKey = "AIzaSyB9adcuxkUImTLqrVqzIxkLAawBB22N7qg"; // <-- JANGAN LUPA ISI KEY BARU
+    const apiKey = "AIzaSyCMnuVhFJ3gPOL1ExnS-fXFvTwpzFIXr3o"; // <-- JANGAN LUPA ISI KEY BARU
 
     if (!apiKey || apiKey.includes("MASUKKAN_KEY")) {
          throw new Error("API Key belum diisi di route.ts");
