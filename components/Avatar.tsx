@@ -81,43 +81,49 @@ export default function Avatar() {
 
   // --- 2. SISTEM SUARA (GadisNeural) ---
   
-  const speakText = (text: string) => {
-    // Batalkan suara yang sedang berjalan
-    window.speechSynthesis.cancel();
+// Di dalam file Avatar.tsx, cari fungsi speakText dan ganti dengan ini:
 
-    const utterance = new SpeechSynthesisUtterance(text);
-    
-    // Ambil semua daftar suara di browser
-    const voices = window.speechSynthesis.getVoices();
-    
-    // Cari spesifik id-ID-GadisNeural
-    // Di beberapa browser namanya mungkin "Microsoft Gadis Online (Natural) - Indonesian"
-    const gadisVoice = voices.find(v => 
-        v.name.includes('Gadis') || 
-        v.lang === 'id-ID' && v.name.includes('Natural')
-    ) || voices.find(v => v.lang === 'id-ID'); // Fallback ke suara Indo apa saja
+const speakText = (text: string) => {
+  // 1. Batalkan suara yang sedang berjalan
+  window.speechSynthesis.cancel();
 
-    if (gadisVoice) {
-      utterance.voice = gadisVoice;
-    }
+  // 2. FILTER: Hapus teks di dalam kurung agar tidak dibaca (contoh: (nunduk) tidak akan disuarakan)
+  const textToSpeak = text.replace(/\(.*?\)/g, '').trim();
 
-    // Tuning agar lebih imut/anime
-    utterance.rate = 1.1;  // Sedikit lebih cepat
-    utterance.pitch = 1.2; // Sedikit lebih tinggi agar ceria
+  const utterance = new SpeechSynthesisUtterance(textToSpeak);
+  
+  // 3. FORCE: Gunakan 1 voice saja (GadisNeural)
+  const voices = window.speechSynthesis.getVoices();
+  
+  // Mencari suara Gadis (Microsoft Edge/Chrome Online)
+  const selectedVoice = voices.find(v => v.name.includes('Gadis')) || 
+                        voices.find(v => v.lang === 'id-ID' && v.name.includes('Natural'));
 
-    utterance.onstart = () => {
-      setIsSpeaking(true);
-      PIXI.Ticker.shared.add(animateMouth);
-    };
+  if (selectedVoice) {
+    utterance.voice = selectedVoice;
+  } else {
+    // Jika tidak ketemu, cari suara perempuan Indonesia manapun
+    const femaleIndo = voices.find(v => v.lang === 'id-ID' && (v.name.includes('Female') || v.name.includes('Google')));
+    if (femaleIndo) utterance.voice = femaleIndo;
+  }
 
-    utterance.onend = () => {
-      setIsSpeaking(false);
-      PIXI.Ticker.shared.remove(animateMouth);
-      resetMouth();
-    };
+  // 4. TUNING: Sesuaikan nada untuk karakter pemalu
+  utterance.pitch = 0.9;  // Sedikit rendah agar tidak terlalu melengking (lebih tenang)
+  utterance.rate = 0.85;   // Bicaranya agak lambat karena dia ragu-ragu/pemalu
 
-    window.speechSynthesis.speak(utterance);
+  utterance.onstart = () => {
+    setIsSpeaking(true);
+    if (PIXI.Ticker.shared) PIXI.Ticker.shared.add(animateMouth);
   };
+
+  utterance.onend = () => {
+    setIsSpeaking(false);
+    if (PIXI.Ticker.shared) PIXI.Ticker.shared.remove(animateMouth);
+    resetMouth();
+  };
+
+  window.speechSynthesis.speak(utterance);
+};
 
   // Animasi Mulut (Sinkronisasi sederhana)
   const animateMouth = () => {
