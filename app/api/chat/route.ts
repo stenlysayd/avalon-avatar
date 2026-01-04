@@ -3,15 +3,17 @@ import { GoogleGenerativeAI } from '@google/generative-ai';
 
 export async function POST(req: Request) {
   try {
-    // Terima history dari frontend
     const { history } = await req.json();
     
-    // API KEY (Pastikan sudah diisi/pakai env)
-    // Gunakan process.env.GEMINI_API_KEY jika sudah fix, atau hardcode key baru Anda di sini
-     // <-- JANGAN LUPA ISI KEY BARU
-    const apiKey = "";
-    if (!apiKey || apiKey.includes("MASUKKAN_KEY")) {
-         throw new Error("API Key belum diisi di route.ts");
+    // AMBIL DARI ENVIRONMENT VARIABLE
+    const apiKey = process.env.GEMINI_API_KEY;
+
+    // Validasi apakah API Key ada
+    if (!apiKey) {
+      console.error("Missing GEMINI_API_KEY in environment variables");
+      return NextResponse.json({ 
+        reply: "Duh, Avalon lagi pusing.. (API Key belum dikonfigurasi)" 
+      }, { status: 500 });
     }
 
     const genAI = new GoogleGenerativeAI(apiKey);
@@ -26,20 +28,16 @@ export async function POST(req: Request) {
         `
     });
 
-    // --- FITUR MEMORI (CHAT SESSION) ---
-    // Pisahkan pesan terakhir (pesan user sekarang) dari history sebelumnya
     const lastMessage = history[history.length - 1]; 
     const previousHistory = history.slice(0, -1);
 
-    // Mulai sesi chat dengan history
     const chat = model.startChat({
         history: previousHistory,
         generationConfig: {
-            maxOutputTokens: 200, // Batasi biar gak kepanjangan
+            maxOutputTokens: 200,
         },
     });
 
-    // Kirim pesan baru
     const result = await chat.sendMessage(lastMessage.parts[0].text);
     const text = result.response.text();
 
@@ -48,7 +46,7 @@ export async function POST(req: Request) {
   } catch (error: any) {
     console.error("SERVER ERROR:", error);
     return NextResponse.json({ 
-        reply: `Error: ${error.message}` 
+        reply: "Aduh, ada masalah teknis nih. Coba lagi nanti ya!" 
     }, { status: 500 });
   }
 }
