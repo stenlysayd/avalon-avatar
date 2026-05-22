@@ -39,7 +39,7 @@ NEXT_PUBLIC_LIVE2D_MODEL_URL=https://example.com/model.model3.json
 The recommended free setup is Edge TTS with the Indonesian female `GadisNeural` voice. It runs through a small serverless package, does not use your GPU, and does not download a local AI model.
 
 ```bash
-TTS_PROVIDER=edge
+TTS_PROVIDER=auto
 EDGE_TTS_VOICE=id-ID-GadisNeural
 EDGE_TTS_RATE=+8%
 EDGE_TTS_PITCH=+18Hz
@@ -76,6 +76,16 @@ ELEVENLABS_SPEED=1
 ELEVENLABS_SPEAKER_BOOST=true
 NEXT_PUBLIC_TTS_MODE=stream
 ```
+
+`TTS_PROVIDER=auto` picks ElevenLabs first when `ELEVENLABS_API_KEY` and `ELEVENLABS_VOICE_ID` are present, then OpenAI, then a local Edge endpoint, then Edge TTS. This prevents an old `TTS_PROVIDER=edge` template value from silently overriding ElevenLabs credentials.
+
+You can confirm the provider used by a deployment without exposing secrets:
+
+```bash
+curl -I "https://your-domain.vercel.app/api/tts?text=halo"
+```
+
+Check the `X-TTS-Provider` response header.
 
 ```bash
 TTS_PROVIDER=edge-local

@@ -12,6 +12,7 @@ const ttsRequestSchema = z.object({
 });
 
 type TtsProvider = "none" | "edge" | "edge-local" | "openai" | "elevenlabs";
+type TtsProviderSetting = TtsProvider | "auto";
 
 interface TtsResult {
   audio: string | null;
@@ -42,6 +43,34 @@ function audioHeaders(provider: TtsProvider) {
     "Cache-Control": "no-store",
     "X-TTS-Provider": provider,
   };
+}
+
+function hasElevenLabsConfig() {
+  return Boolean(process.env.ELEVENLABS_API_KEY && process.env.ELEVENLABS_VOICE_ID);
+}
+
+function hasOpenAiConfig() {
+  return Boolean(process.env.OPENAI_API_KEY);
+}
+
+function hasEdgeLocalConfig() {
+  return Boolean(process.env.EDGE_TTS_URL);
+}
+
+function resolveTtsProvider(): TtsProvider {
+  const setting = (process.env.TTS_PROVIDER || "auto").toLowerCase() as TtsProviderSetting;
+
+  if (setting === "none") return "none";
+  if (setting === "elevenlabs" && hasElevenLabsConfig()) return "elevenlabs";
+  if (setting === "openai" && hasOpenAiConfig()) return "openai";
+  if (setting === "edge-local" && hasEdgeLocalConfig()) return "edge-local";
+
+  // Auto mode also covers older templates that still leave TTS_PROVIDER=edge active.
+  if (hasElevenLabsConfig()) return "elevenlabs";
+  if (hasOpenAiConfig()) return "openai";
+  if (hasEdgeLocalConfig()) return "edge-local";
+
+  return "edge";
 }
 
 function openAiPayload(text: string) {
@@ -189,7 +218,7 @@ export async function POST(req: Request) {
   try {
     const { text } = ttsRequestSchema.parse(await req.json());
     const textToSpeak = stripStageDirections(text);
-    const provider = (process.env.TTS_PROVIDER || "edge") as TtsProvider;
+    const provider = resolveTtsProvider();
 
     if (!textToSpeak) {
       return json({ audio: null, mimeType: "audio/mpeg", provider: "browser" });
@@ -218,7 +247,7 @@ export async function GET(req: Request) {
   }
 
   const textToSpeak = stripStageDirections(parsed.data.text);
-  const provider = (process.env.TTS_PROVIDER || "edge") as TtsProvider;
+  const provider = resolveTtsProvider();
 
   if (!textToSpeak || provider === "none") {
     return new Response(null, { status: 204 });
