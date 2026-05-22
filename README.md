@@ -7,7 +7,7 @@ Avalon Avatar is a web-based anime AI companion prototype. It combines:
 - Groq chat responses with a strict Avalon JSON contract
 - Optional server-side TTS providers
 - Browser speech fallback for Vercel deployments
-- Temporary Live2D zip loading in the browser without extracting files to disk
+- Live2D zip loading with browser-side saved model selection
 
 ## Setup
 
@@ -94,7 +94,11 @@ For production, host your chosen Avalon model somewhere stable and set:
 NEXT_PUBLIC_LIVE2D_MODEL_URL=https://example.com/avalon.model3.json
 ```
 
-If a custom model still appears too large or too small, tune it without code changes:
+Uploaded zip models are saved in the browser's IndexedDB after a successful load, so the same browser can pick them again from the model dropdown without reuploading. The saved zip stays on that device/browser profile; it is not uploaded to GitHub, Vercel, or your server.
+
+The avatar can also be dragged on the canvas. Use the slider button in the app to fine-tune size and X/Y position; those settings are saved in `localStorage`.
+
+If a custom model still appears too large or too small across all users, tune the default multiplier without code changes:
 
 ```bash
 NEXT_PUBLIC_AVATAR_SCALE=0.85

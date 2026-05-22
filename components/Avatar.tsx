@@ -1,8 +1,22 @@
 "use client";
 
 import JSZip, { type JSZipObject } from "jszip";
-import { SendHorizontal, Upload, Volume2, VolumeX } from "lucide-react";
-import { useEffect, useMemo, useRef, useState } from "react";
+import {
+  RotateCcw,
+  SendHorizontal,
+  SlidersHorizontal,
+  Trash2,
+  Upload,
+  Volume2,
+  VolumeX,
+} from "lucide-react";
+import {
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type PointerEvent as ReactPointerEvent,
+} from "react";
 import * as PIXI from "pixi.js";
 import {
   FALLBACK_RESPONSE,
@@ -51,6 +65,23 @@ interface UploadedModelSource {
   capabilities: ModelCapabilities;
 }
 
+interface StoredModelMeta {
+  id: string;
+  name: string;
+  size: number;
+  updatedAt: number;
+}
+
+interface StoredModelRecord extends StoredModelMeta {
+  blob: Blob;
+}
+
+interface AvatarTransform {
+  scale: number;
+  x: number;
+  y: number;
+}
+
 const INITIAL_MESSAGE: ChatBubble = {
   id: "hello",
   role: "assistant",
@@ -64,6 +95,21 @@ const LIVE2D_MODEL_URL =
 
 const TTS_MODE = process.env.NEXT_PUBLIC_TTS_MODE || "stream";
 const AVATAR_SCALE_MULTIPLIER = Number(process.env.NEXT_PUBLIC_AVATAR_SCALE || "1");
+const MODEL_DB_NAME = "avalon-avatar-models";
+const MODEL_DB_VERSION = 1;
+const MODEL_STORE_NAME = "models";
+const ACTIVE_MODEL_KEY = "avalon-active-model-id";
+const AVATAR_TRANSFORM_KEY = "avalon-avatar-transform";
+const SAMPLE_MODEL_ID = "sample";
+const DEFAULT_TRANSFORM: AvatarTransform = { scale: 1, x: 0, y: 0 };
+const TRANSFORM_LIMITS = {
+  minScale: 0.6,
+  maxScale: 1.9,
+  minX: -520,
+  maxX: 520,
+  minY: -360,
+  maxY: 360,
+};
 
 const DEFAULT_CAPABILITIES: ModelCapabilities = {
   expressions: ["f00", "f01", "f02", "f03", "f04", "f05", "f06", "f07"],
@@ -218,7 +264,11 @@ function readCapabilities(modelJson: Record<string, unknown>): ModelCapabilities
   };
 }
 
-async function createUploadedModelSource(file: File): Promise<UploadedModelSource> {
+async function createUploadedModelSource(
+  file: Blob,
+  fallbackLabel =
+    typeof File !== "undefined" && file instanceof File ? file.name : "Live2D model",
+): Promise<UploadedModelSource> {
   const zip = await JSZip.loadAsync(file);
   const lookup = buildEntryLookup(zip);
   const modelEntry = [...lookup.values()].find((entry) =>
@@ -289,10 +339,136 @@ async function createUploadedModelSource(file: File): Promise<UploadedModelSourc
 
   return {
     url,
-    label: file.name.replace(/\.zip$/i, ""),
+    label: fallbackLabel.replace(/\.zip$/i, ""),
     objectUrls,
     capabilities: readCapabilities(modelJson),
   };
+}
+
+function openModelDb() {
+  return new Promise<IDBDatabase>((resolve, reject) => {
+    if (typeof window === "undefined" || !("indexedDB" in window)) {
+      reject(new Error("IndexedDB tidak tersedia"));
+      return;
+    }
+
+    const request = indexedDB.open(MODEL_DB_NAME, MODEL_DB_VERSION);
+
+    request.onupgradeneeded = () => {
+      const db = request.result;
+      if (!db.objectStoreNames.contains(MODEL_STORE_NAME)) {
+        db.createObjectStore(MODEL_STORE_NAME, { keyPath: "id" });
+      }
+    };
+
+    request.onsuccess = () => resolve(request.result);
+    request.onerror = () => reject(request.error ?? new Error("Database model gagal dibuka"));
+  });
+}
+
+function transactionComplete(transaction: IDBTransaction) {
+  return new Promise<void>((resolve, reject) => {
+    transaction.oncomplete = () => resolve();
+    transaction.onerror = () =>
+      reject(transaction.error ?? new Error("Transaksi database model gagal"));
+    transaction.onabort = () =>
+      reject(transaction.error ?? new Error("Transaksi database model dibatalkan"));
+  });
+}
+
+function requestResult<T>(request: IDBRequest<T>) {
+  return new Promise<T>((resolve, reject) => {
+    request.onsuccess = () => resolve(request.result);
+    request.onerror = () => reject(request.error ?? new Error("Request database model gagal"));
+  });
+}
+
+async function listStoredModels(): Promise<StoredModelMeta[]> {
+  const db = await openModelDb();
+
+  try {
+    const transaction = db.transaction(MODEL_STORE_NAME, "readonly");
+    const request = transaction
+      .objectStore(MODEL_STORE_NAME)
+      .getAll() as IDBRequest<StoredModelRecord[]>;
+    const records = await requestResult(request);
+
+    return records
+      .map(({ id, name, size, updatedAt }) => ({ id, name, size, updatedAt }))
+      .sort((a, b) => b.updatedAt - a.updatedAt);
+  } finally {
+    db.close();
+  }
+}
+
+async function getStoredModel(id: string): Promise<StoredModelRecord | null> {
+  const db = await openModelDb();
+
+  try {
+    const transaction = db.transaction(MODEL_STORE_NAME, "readonly");
+    const request = transaction
+      .objectStore(MODEL_STORE_NAME)
+      .get(id) as IDBRequest<StoredModelRecord | undefined>;
+
+    return (await requestResult(request)) ?? null;
+  } finally {
+    db.close();
+  }
+}
+
+async function saveStoredModel(record: StoredModelRecord) {
+  const db = await openModelDb();
+
+  try {
+    const transaction = db.transaction(MODEL_STORE_NAME, "readwrite");
+    transaction.objectStore(MODEL_STORE_NAME).put(record);
+    await transactionComplete(transaction);
+  } finally {
+    db.close();
+  }
+}
+
+async function deleteStoredModel(id: string) {
+  const db = await openModelDb();
+
+  try {
+    const transaction = db.transaction(MODEL_STORE_NAME, "readwrite");
+    transaction.objectStore(MODEL_STORE_NAME).delete(id);
+    await transactionComplete(transaction);
+  } finally {
+    db.close();
+  }
+}
+
+function readStoredTransform(): AvatarTransform {
+  if (typeof window === "undefined") return DEFAULT_TRANSFORM;
+
+  try {
+    const raw = window.localStorage.getItem(AVATAR_TRANSFORM_KEY);
+    if (!raw) return DEFAULT_TRANSFORM;
+
+    const parsed = JSON.parse(raw) as Partial<AvatarTransform>;
+
+    return {
+      scale: clamp(
+        Number(parsed.scale) || DEFAULT_TRANSFORM.scale,
+        TRANSFORM_LIMITS.minScale,
+        TRANSFORM_LIMITS.maxScale,
+      ),
+      x: clamp(Number(parsed.x) || 0, TRANSFORM_LIMITS.minX, TRANSFORM_LIMITS.maxX),
+      y: clamp(Number(parsed.y) || 0, TRANSFORM_LIMITS.minY, TRANSFORM_LIMITS.maxY),
+    };
+  } catch {
+    return DEFAULT_TRANSFORM;
+  }
+}
+
+function saveStoredTransform(transform: AvatarTransform) {
+  try {
+    window.localStorage.setItem(AVATAR_TRANSFORM_KEY, JSON.stringify(transform));
+  } catch {
+    // Browsers can disable storage in strict privacy modes.
+  }
 }
 
 export default function Avatar() {
@@ -310,6 +486,15 @@ export default function Avatar() {
   const nextIdleMotionAtRef = useRef(0);
   const uploadedObjectUrlsRef = useRef<string[]>([]);
   const capabilitiesRef = useRef<ModelCapabilities>(DEFAULT_CAPABILITIES);
+  const transformRef = useRef<AvatarTransform>(DEFAULT_TRANSFORM);
+  const dragRef = useRef({
+    active: false,
+    pointerId: -1,
+    startX: 0,
+    startY: 0,
+    baseX: 0,
+    baseY: 0,
+  });
   const speakingRef = useRef(false);
   const loadingRef = useRef(false);
 
@@ -325,6 +510,11 @@ export default function Avatar() {
   const [modelLabel, setModelLabel] = useState("Haru sample");
   const [modelCapabilities, setModelCapabilities] =
     useState<ModelCapabilities>(DEFAULT_CAPABILITIES);
+  const [storedModels, setStoredModels] = useState<StoredModelMeta[]>([]);
+  const [activeModelId, setActiveModelId] = useState(SAMPLE_MODEL_ID);
+  const [avatarTransform, setAvatarTransform] = useState<AvatarTransform>(DEFAULT_TRANSFORM);
+  const [hasLoadedTransform, setHasLoadedTransform] = useState(false);
+  const [controlsOpen, setControlsOpen] = useState(false);
 
   const apiMessages = useMemo<ChatMessage[]>(
     () =>
@@ -348,6 +538,24 @@ export default function Avatar() {
   useEffect(() => {
     capabilitiesRef.current = modelCapabilities;
   }, [modelCapabilities]);
+
+  useEffect(() => {
+    const storedTransform = readStoredTransform();
+    transformRef.current = storedTransform;
+    setAvatarTransform(storedTransform);
+    setHasLoadedTransform(true);
+    void refreshStoredModels();
+  }, []);
+
+  useEffect(() => {
+    if (!hasLoadedTransform) return;
+
+    transformRef.current = avatarTransform;
+    saveStoredTransform(avatarTransform);
+
+    const model = modelRef.current;
+    if (model) fitModelToViewport(model);
+  }, [avatarTransform, hasLoadedTransform]);
 
   useEffect(() => {
     if (!canvasRef.current) return;
@@ -386,7 +594,7 @@ export default function Avatar() {
         Live2DModel.registerTicker(PIXI.Ticker);
         if (disposed) return;
         live2DModelRef.current = Live2DModel as Live2DModelConstructor;
-        await loadLive2DModel(LIVE2D_MODEL_URL, "Haru sample", DEFAULT_CAPABILITIES);
+        await loadInitialModel();
       } catch (error) {
         console.error("LIVE2D_ERROR", error);
         setModelError("Model Live2D gagal dimuat.");
@@ -461,14 +669,22 @@ export default function Avatar() {
     const naturalWidth = Math.max(bounds.width, 1);
     const naturalHeight = Math.max(bounds.height, 1);
     const isMobile = window.innerWidth < 720;
-    const widthBudget = window.innerWidth * (isMobile ? 0.82 : 0.42);
-    const heightBudget = window.innerHeight * (isMobile ? 0.54 : 0.62);
+    const transform = transformRef.current;
+    const reservedChatWidth = isMobile ? 0 : Math.min(520, window.innerWidth * 0.34);
+    const stageWidth = window.innerWidth - reservedChatWidth;
+    const stageCenterX = isMobile ? window.innerWidth / 2 : stageWidth / 2;
+    const widthBudget = isMobile ? window.innerWidth * 0.9 : stageWidth * 0.72;
+    const heightBudget = window.innerHeight * (isMobile ? 0.68 : 0.82);
     const rawScale = Math.min(widthBudget / naturalWidth, heightBudget / naturalHeight);
-    const scale = clamp(rawScale * AVATAR_SCALE_MULTIPLIER, 0.02, isMobile ? 0.38 : 0.48);
+    const scale = clamp(
+      rawScale * AVATAR_SCALE_MULTIPLIER * transform.scale,
+      0.02,
+      isMobile ? 1.35 : 1.6,
+    );
 
     model.scale.set(scale);
-    model.x = window.innerWidth / 2;
-    model.y = window.innerHeight * (isMobile ? 0.46 : 0.47);
+    model.x = stageCenterX + transform.x;
+    model.y = window.innerHeight * (isMobile ? 0.52 : 0.56) + transform.y;
   }
 
   async function loadLive2DModel(
@@ -501,6 +717,161 @@ export default function Avatar() {
     setModelLabel(label);
     setModelLoaded(true);
     scheduleNextIdleMotion();
+  }
+
+  async function refreshStoredModels() {
+    try {
+      const models = await listStoredModels();
+      setStoredModels(models);
+      return models;
+    } catch (error) {
+      console.warn("MODEL_DB_LIST_ERROR", error);
+      return [];
+    }
+  }
+
+  function replaceUploadedObjectUrls(nextUrls: string[]) {
+    uploadedObjectUrlsRef.current.forEach((url) => URL.revokeObjectURL(url));
+    uploadedObjectUrlsRef.current = nextUrls;
+  }
+
+  async function loadStoredModelRecord(record: StoredModelRecord) {
+    const source = await createUploadedModelSource(record.blob, record.name);
+
+    try {
+      await loadLive2DModel(source.url, source.label, source.capabilities);
+      replaceUploadedObjectUrls(source.objectUrls);
+      setActiveModelId(record.id);
+      window.localStorage.setItem(ACTIVE_MODEL_KEY, record.id);
+    } catch (error) {
+      source.objectUrls.forEach((url) => URL.revokeObjectURL(url));
+      throw error;
+    }
+  }
+
+  async function loadSampleModel() {
+    await loadLive2DModel(LIVE2D_MODEL_URL, "Haru sample", DEFAULT_CAPABILITIES);
+    replaceUploadedObjectUrls([]);
+    setActiveModelId(SAMPLE_MODEL_ID);
+    window.localStorage.setItem(ACTIVE_MODEL_KEY, SAMPLE_MODEL_ID);
+  }
+
+  async function loadInitialModel() {
+    const models = await refreshStoredModels();
+    const savedActiveId = window.localStorage.getItem(ACTIVE_MODEL_KEY);
+    const activeId = savedActiveId && savedActiveId !== SAMPLE_MODEL_ID ? savedActiveId : null;
+    const shouldLoadStored = activeId && models.some((model) => model.id === activeId);
+
+    if (shouldLoadStored) {
+      try {
+        const record = await getStoredModel(activeId);
+        if (record) {
+          await loadStoredModelRecord(record);
+          return;
+        }
+      } catch (error) {
+        console.warn("MODEL_DB_ACTIVE_LOAD_ERROR", error);
+        setModelError("Model tersimpan gagal dimuat, Avalon pakai model sample dulu.");
+      }
+    }
+
+    await loadSampleModel();
+  }
+
+  async function handleModelSelect(id: string) {
+    if (id === activeModelId || isModelUploading) return;
+
+    setIsModelUploading(true);
+    setModelError(null);
+
+    try {
+      if (id === SAMPLE_MODEL_ID) {
+        await loadSampleModel();
+        return;
+      }
+
+      const record = await getStoredModel(id);
+      if (!record) throw new Error("Model tersimpan tidak ditemukan");
+
+      await loadStoredModelRecord(record);
+    } catch (error) {
+      console.error("MODEL_SELECT_ERROR", error);
+      setModelError("Model tersimpan belum bisa dimuat. Coba upload ulang zip-nya.");
+    } finally {
+      setIsModelUploading(false);
+    }
+  }
+
+  async function handleDeleteActiveModel() {
+    if (activeModelId === SAMPLE_MODEL_ID || isModelUploading) return;
+    if (!window.confirm("Hapus model ini dari daftar tersimpan di browser?")) return;
+
+    setIsModelUploading(true);
+    setModelError(null);
+
+    try {
+      await deleteStoredModel(activeModelId);
+      await refreshStoredModels();
+      await loadSampleModel();
+    } catch (error) {
+      console.error("MODEL_DELETE_ERROR", error);
+      setModelError("Model belum bisa dihapus dari browser.");
+    } finally {
+      setIsModelUploading(false);
+    }
+  }
+
+  function updateAvatarTransform(nextTransform: Partial<AvatarTransform>) {
+    setAvatarTransform((current) => ({
+      scale: clamp(
+        nextTransform.scale ?? current.scale,
+        TRANSFORM_LIMITS.minScale,
+        TRANSFORM_LIMITS.maxScale,
+      ),
+      x: clamp(nextTransform.x ?? current.x, TRANSFORM_LIMITS.minX, TRANSFORM_LIMITS.maxX),
+      y: clamp(nextTransform.y ?? current.y, TRANSFORM_LIMITS.minY, TRANSFORM_LIMITS.maxY),
+    }));
+  }
+
+  function resetAvatarTransform() {
+    setAvatarTransform(DEFAULT_TRANSFORM);
+  }
+
+  function handleCanvasPointerDown(event: ReactPointerEvent<HTMLCanvasElement>) {
+    if (event.button !== 0) return;
+
+    const transform = transformRef.current;
+    dragRef.current = {
+      active: true,
+      pointerId: event.pointerId,
+      startX: event.clientX,
+      startY: event.clientY,
+      baseX: transform.x,
+      baseY: transform.y,
+    };
+    event.currentTarget.setPointerCapture(event.pointerId);
+  }
+
+  function handleCanvasPointerMove(event: ReactPointerEvent<HTMLCanvasElement>) {
+    const drag = dragRef.current;
+    if (!drag.active || drag.pointerId !== event.pointerId) return;
+
+    updateAvatarTransform({
+      x: drag.baseX + event.clientX - drag.startX,
+      y: drag.baseY + event.clientY - drag.startY,
+    });
+  }
+
+  function handleCanvasPointerUp(event: ReactPointerEvent<HTMLCanvasElement>) {
+    const drag = dragRef.current;
+    if (!drag.active || drag.pointerId !== event.pointerId) return;
+
+    dragRef.current = { ...drag, active: false };
+    try {
+      event.currentTarget.releasePointerCapture(event.pointerId);
+    } catch {
+      // The browser may already release capture when the pointer leaves the canvas.
+    }
   }
 
   function findExpression(emotion: AvalonResponse["emotion"]) {
@@ -754,9 +1125,31 @@ export default function Avatar() {
 
     try {
       const source = await createUploadedModelSource(file);
-      await loadLive2DModel(source.url, source.label, source.capabilities);
-      uploadedObjectUrlsRef.current.forEach((url) => URL.revokeObjectURL(url));
-      uploadedObjectUrlsRef.current = source.objectUrls;
+
+      try {
+        await loadLive2DModel(source.url, source.label, source.capabilities);
+        replaceUploadedObjectUrls(source.objectUrls);
+      } catch (error) {
+        source.objectUrls.forEach((url) => URL.revokeObjectURL(url));
+        throw error;
+      }
+
+      try {
+        const id = createId();
+        await saveStoredModel({
+          id,
+          name: source.label,
+          size: file.size,
+          updatedAt: Date.now(),
+          blob: file,
+        });
+        await refreshStoredModels();
+        setActiveModelId(id);
+        window.localStorage.setItem(ACTIVE_MODEL_KEY, id);
+      } catch (error) {
+        console.warn("MODEL_DB_SAVE_ERROR", error);
+        setModelError("Model berhasil dimuat, tapi browser gagal menyimpannya.");
+      }
     } catch (error) {
       console.error("MODEL_UPLOAD_ERROR", error);
       setModelError("Zip Live2D belum bisa dimuat. Pastikan ada file .model3.json di dalamnya.");
@@ -830,10 +1223,17 @@ export default function Avatar() {
   return (
     <div className="relative h-screen w-full overflow-hidden bg-[#101114] font-sans text-white">
       <div className="absolute inset-0 bg-[radial-gradient(circle_at_50%_10%,rgba(34,211,238,0.16),transparent_34%),linear-gradient(180deg,#14171f_0%,#08090b_100%)]" />
-      <canvas ref={canvasRef} className="absolute inset-0 z-10" />
+      <canvas
+        ref={canvasRef}
+        className="absolute inset-0 z-10 cursor-grab touch-none active:cursor-grabbing"
+        onPointerDown={handleCanvasPointerDown}
+        onPointerMove={handleCanvasPointerMove}
+        onPointerUp={handleCanvasPointerUp}
+        onPointerCancel={handleCanvasPointerUp}
+      />
 
-      <div className="pointer-events-none absolute inset-0 z-20 flex flex-col justify-end px-3 pb-5 sm:px-6 sm:pb-8">
-        <div className="mx-auto flex w-full max-w-2xl flex-col gap-3">
+      <div className="pointer-events-none absolute inset-0 z-20 flex items-stretch justify-end px-3 py-4 sm:px-5 sm:py-6">
+        <div className="ml-auto flex h-full w-full max-w-[460px] flex-col justify-end gap-3 md:max-w-[500px]">
           <div className="flex items-center justify-between gap-3 text-xs text-white/65">
             <span className="min-w-0 truncate">
               {modelLoaded ? "Avalon online" : "Memuat Avalon"} - {modelLabel}
@@ -846,6 +1246,15 @@ export default function Avatar() {
                 className="hidden"
                 onChange={(event) => void handleModelUpload(event.target.files?.[0])}
               />
+              <button
+                type="button"
+                onClick={() => setControlsOpen((open) => !open)}
+                className="pointer-events-auto inline-flex h-9 w-9 items-center justify-center rounded-full border border-white/15 bg-black/35 text-white/80 backdrop-blur transition hover:bg-white/10"
+                aria-label="Atur avatar"
+                title="Atur avatar"
+              >
+                <SlidersHorizontal size={16} />
+              </button>
               <button
                 type="button"
                 onClick={() => fileInputRef.current?.click()}
@@ -871,9 +1280,106 @@ export default function Avatar() {
             </div>
           </div>
 
+          <div className="pointer-events-auto rounded-md border border-white/10 bg-black/35 p-3 shadow-2xl backdrop-blur-md">
+            <div className="flex items-center gap-2">
+              <select
+                value={activeModelId}
+                disabled={isModelUploading}
+                onChange={(event) => void handleModelSelect(event.target.value)}
+                className="min-w-0 flex-1 rounded-md border border-white/10 bg-zinc-950/80 px-3 py-2 text-sm text-white outline-none disabled:cursor-wait disabled:opacity-60"
+                aria-label="Pilih model Live2D"
+                title="Pilih model Live2D"
+              >
+                <option value={SAMPLE_MODEL_ID}>Haru sample</option>
+                {storedModels.map((model) => (
+                  <option key={model.id} value={model.id}>
+                    {model.name}
+                  </option>
+                ))}
+              </select>
+
+              {activeModelId !== SAMPLE_MODEL_ID && (
+                <button
+                  type="button"
+                  onClick={() => void handleDeleteActiveModel()}
+                  disabled={isModelUploading}
+                  className="inline-flex h-10 w-10 shrink-0 items-center justify-center rounded-md border border-white/10 bg-zinc-950/70 text-white/75 transition hover:bg-white/10 disabled:cursor-wait disabled:opacity-60"
+                  aria-label="Hapus model tersimpan"
+                  title="Hapus model tersimpan"
+                >
+                  <Trash2 size={16} />
+                </button>
+              )}
+            </div>
+
+            {controlsOpen && (
+              <div className="mt-3 grid gap-3 border-t border-white/10 pt-3">
+                <label className="grid gap-1 text-[11px] text-white/60">
+                  <span className="flex items-center justify-between gap-3">
+                    <span>Ukuran</span>
+                    <span>{Math.round(avatarTransform.scale * 100)}%</span>
+                  </span>
+                  <input
+                    type="range"
+                    min={TRANSFORM_LIMITS.minScale}
+                    max={TRANSFORM_LIMITS.maxScale}
+                    step="0.05"
+                    value={avatarTransform.scale}
+                    onChange={(event) =>
+                      updateAvatarTransform({ scale: Number(event.target.value) })
+                    }
+                    className="accent-cyan-300"
+                  />
+                </label>
+
+                <label className="grid gap-1 text-[11px] text-white/60">
+                  <span className="flex items-center justify-between gap-3">
+                    <span>Posisi X</span>
+                    <span>{Math.round(avatarTransform.x)} px</span>
+                  </span>
+                  <input
+                    type="range"
+                    min={TRANSFORM_LIMITS.minX}
+                    max={TRANSFORM_LIMITS.maxX}
+                    step="10"
+                    value={avatarTransform.x}
+                    onChange={(event) => updateAvatarTransform({ x: Number(event.target.value) })}
+                    className="accent-cyan-300"
+                  />
+                </label>
+
+                <label className="grid gap-1 text-[11px] text-white/60">
+                  <span className="flex items-center justify-between gap-3">
+                    <span>Posisi Y</span>
+                    <span>{Math.round(avatarTransform.y)} px</span>
+                  </span>
+                  <input
+                    type="range"
+                    min={TRANSFORM_LIMITS.minY}
+                    max={TRANSFORM_LIMITS.maxY}
+                    step="10"
+                    value={avatarTransform.y}
+                    onChange={(event) => updateAvatarTransform({ y: Number(event.target.value) })}
+                    className="accent-cyan-300"
+                  />
+                </label>
+
+                <button
+                  type="button"
+                  onClick={resetAvatarTransform}
+                  className="inline-flex h-9 w-9 items-center justify-center rounded-md border border-white/10 bg-zinc-950/70 text-white/80 transition hover:bg-white/10"
+                  aria-label="Reset posisi avatar"
+                  title="Reset posisi avatar"
+                >
+                  <RotateCcw size={15} />
+                </button>
+              </div>
+            )}
+          </div>
+
           <div
             ref={chatContainerRef}
-            className="pointer-events-auto max-h-[44vh] overflow-y-auto rounded-md border border-white/10 bg-black/25 p-3 shadow-2xl backdrop-blur-md sm:p-4"
+            className="pointer-events-auto max-h-[46vh] overflow-y-auto rounded-md border border-white/10 bg-black/25 p-3 shadow-2xl backdrop-blur-md sm:p-4 md:max-h-[calc(100vh-310px)]"
           >
             <div className="space-y-3">
               {messages.map((message) => (
