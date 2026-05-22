@@ -20,6 +20,17 @@ interface TtsResult {
   provider: TtsProvider | "browser";
 }
 
+class TtsProviderError extends Error {
+  constructor(
+    public provider: TtsProvider,
+    public status: number,
+    message: string,
+  ) {
+    super(message);
+    this.name = "TtsProviderError";
+  }
+}
+
 function toBase64(buffer: ArrayBuffer) {
   return Buffer.from(buffer).toString("base64");
 }
@@ -42,6 +53,16 @@ function audioHeaders(provider: TtsProvider) {
     "Content-Type": "audio/mpeg",
     "Cache-Control": "no-store",
     "X-TTS-Provider": provider,
+  };
+}
+
+function errorHeaders(provider: TtsProvider, error: unknown) {
+  return {
+    "Content-Type": "text/plain; charset=utf-8",
+    "Cache-Control": "no-store",
+    "X-TTS-Provider": provider,
+    "X-TTS-Upstream-Status":
+      error instanceof TtsProviderError ? String(error.status) : "unknown",
   };
 }
 
@@ -98,7 +119,10 @@ async function requestOpenAiAudio(text: string) {
     body: JSON.stringify(openAiPayload(text)),
   });
 
-  if (!response.ok) throw new Error(`OpenAI TTS failed: ${response.status}`);
+  if (!response.ok) {
+    throw new TtsProviderError("openai", response.status, `OpenAI TTS failed: ${response.status}`);
+  }
+
   return response;
 }
 
@@ -135,7 +159,14 @@ async function requestElevenLabsAudio(text: string) {
     },
   );
 
-  if (!response.ok) throw new Error(`ElevenLabs TTS failed: ${response.status}`);
+  if (!response.ok) {
+    throw new TtsProviderError(
+      "elevenlabs",
+      response.status,
+      `ElevenLabs TTS failed: ${response.status}`,
+    );
+  }
+
   return response;
 }
 
@@ -215,10 +246,11 @@ async function synthesizeWithEdgeLocal(text: string): Promise<TtsResult> {
 }
 
 export async function POST(req: Request) {
+  const provider = resolveTtsProvider();
+
   try {
     const { text } = ttsRequestSchema.parse(await req.json());
     const textToSpeak = stripStageDirections(text);
-    const provider = resolveTtsProvider();
 
     if (!textToSpeak) {
       return json({ audio: null, mimeType: "audio/mpeg", provider: "browser" });
@@ -232,7 +264,10 @@ export async function POST(req: Request) {
     return json({ audio: null, mimeType: "audio/mpeg", provider: "browser" });
   } catch (error) {
     console.error("TTS_ERROR", error);
-    return json({ audio: null, mimeType: "audio/mpeg", provider: "browser" });
+    return NextResponse.json(
+      { audio: null, mimeType: "audio/mpeg", provider: "browser" },
+      { headers: errorHeaders(provider, error) },
+    );
   }
 }
 
@@ -296,6 +331,9 @@ export async function GET(req: Request) {
     });
   } catch (error) {
     console.error("TTS_STREAM_ERROR", error);
-    return new Response("TTS provider failed", { status: 502 });
+    return new Response("TTS provider failed", {
+      status: 502,
+      headers: errorHeaders(provider, error),
+    });
   }
 }
