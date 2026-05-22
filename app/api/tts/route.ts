@@ -20,6 +20,11 @@ interface TtsResult {
   provider: TtsProvider | "browser";
 }
 
+interface TtsAttemptFailure {
+  provider: TtsProvider;
+  status: string;
+}
+
 class TtsProviderError extends Error {
   constructor(
     public provider: TtsProvider,
@@ -35,8 +40,8 @@ function toBase64(buffer: ArrayBuffer) {
   return Buffer.from(buffer).toString("base64");
 }
 
-function json(result: TtsResult, status = 200) {
-  return NextResponse.json(result, { status });
+function json(result: TtsResult, status = 200, headers?: Record<string, string>) {
+  return NextResponse.json(result, { status, headers });
 }
 
 function edgeOptions() {
@@ -48,11 +53,26 @@ function edgeOptions() {
   };
 }
 
-function audioHeaders(provider: TtsProvider) {
-  return {
-    "Content-Type": "audio/mpeg",
+function diagnosticHeaders(provider: TtsProvider, failures: TtsAttemptFailure[] = []) {
+  const fallbackFrom = failures.map((failure) => failure.provider).join(",");
+  const upstreamStatuses = failures
+    .map((failure) => `${failure.provider}:${failure.status}`)
+    .join(",");
+  const headers: Record<string, string> = {
     "Cache-Control": "no-store",
     "X-TTS-Provider": provider,
+  };
+
+  if (fallbackFrom) headers["X-TTS-Fallback-From"] = fallbackFrom;
+  if (upstreamStatuses) headers["X-TTS-Upstream-Status"] = upstreamStatuses;
+
+  return headers;
+}
+
+function audioHeaders(provider: TtsProvider, failures: TtsAttemptFailure[] = []) {
+  return {
+    "Content-Type": "audio/mpeg",
+    ...diagnosticHeaders(provider, failures),
   };
 }
 
@@ -64,6 +84,10 @@ function errorHeaders(provider: TtsProvider, error: unknown) {
     "X-TTS-Upstream-Status":
       error instanceof TtsProviderError ? String(error.status) : "unknown",
   };
+}
+
+function errorStatus(error: unknown) {
+  return error instanceof TtsProviderError ? String(error.status) : "unknown";
 }
 
 function hasElevenLabsConfig() {
@@ -92,6 +116,21 @@ function resolveTtsProvider(): TtsProvider {
   if (hasEdgeLocalConfig()) return "edge-local";
 
   return "edge";
+}
+
+function isProviderUsable(provider: TtsProvider) {
+  if (provider === "none") return false;
+  if (provider === "elevenlabs") return hasElevenLabsConfig();
+  if (provider === "openai") return hasOpenAiConfig();
+  if (provider === "edge-local") return hasEdgeLocalConfig();
+  return true;
+}
+
+function providerAttempts(primary: TtsProvider) {
+  const ordered: TtsProvider[] = [primary, "elevenlabs", "openai", "edge-local", "edge"];
+  const deduped = ordered.filter((provider, index) => ordered.indexOf(provider) === index);
+
+  return deduped.filter(isProviderUsable);
 }
 
 function openAiPayload(text: string) {
@@ -170,11 +209,15 @@ async function requestElevenLabsAudio(text: string) {
   return response;
 }
 
-function streamUpstreamAudio(response: Response, provider: TtsProvider) {
+function streamUpstreamAudio(
+  response: Response,
+  provider: TtsProvider,
+  failures: TtsAttemptFailure[] = [],
+) {
   if (!response.body) throw new Error(`${provider} TTS returned an empty body`);
 
   return new Response(response.body, {
-    headers: audioHeaders(provider),
+    headers: audioHeaders(provider, failures),
   });
 }
 
@@ -245,6 +288,104 @@ async function synthesizeWithEdgeLocal(text: string): Promise<TtsResult> {
   };
 }
 
+async function synthesizeWithProvider(provider: TtsProvider, text: string): Promise<TtsResult> {
+  if (provider === "edge") return synthesizeWithEdge(text);
+  if (provider === "openai") return synthesizeWithOpenAI(text);
+  if (provider === "elevenlabs") return synthesizeWithElevenLabs(text);
+  if (provider === "edge-local") return synthesizeWithEdgeLocal(text);
+
+  return { audio: null, mimeType: "audio/mpeg", provider: "browser" };
+}
+
+async function synthesizeWithFallback(primary: TtsProvider, text: string) {
+  const failures: TtsAttemptFailure[] = [];
+
+  for (const provider of providerAttempts(primary)) {
+    try {
+      return {
+        result: await synthesizeWithProvider(provider, text),
+        failures,
+      };
+    } catch (error) {
+      console.warn("TTS_PROVIDER_FALLBACK", provider, error);
+      failures.push({ provider, status: errorStatus(error) });
+    }
+  }
+
+  return {
+    result: { audio: null, mimeType: "audio/mpeg", provider: "browser" } satisfies TtsResult,
+    failures,
+  };
+}
+
+async function streamWithProvider(
+  provider: TtsProvider,
+  text: string,
+  failures: TtsAttemptFailure[],
+) {
+  if (provider === "elevenlabs") {
+    return streamUpstreamAudio(await requestElevenLabsAudio(text), "elevenlabs", failures);
+  }
+
+  if (provider === "openai") {
+    return streamUpstreamAudio(await requestOpenAiAudio(text), "openai", failures);
+  }
+
+  if (provider === "edge-local") {
+    const result = await synthesizeWithEdgeLocal(text);
+
+    if (!result.audio) throw new Error("Edge local TTS returned empty audio");
+
+    return new Response(Buffer.from(result.audio, "base64"), {
+      headers: audioHeaders("edge-local", failures),
+    });
+  }
+
+  const tts = new EdgeTTS();
+  const stream = new ReadableStream<Uint8Array>({
+    async start(controller) {
+      try {
+        for await (const chunk of tts.synthesizeStream(
+          escapeXml(text),
+          process.env.EDGE_TTS_VOICE || "id-ID-GadisNeural",
+          edgeOptions(),
+        )) {
+          controller.enqueue(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+        }
+        controller.close();
+      } catch (error) {
+        console.error("TTS_STREAM_ERROR", error);
+        controller.error(error);
+      }
+    },
+  });
+
+  return new Response(stream, {
+    headers: audioHeaders("edge", failures),
+  });
+}
+
+async function streamWithFallback(primary: TtsProvider, text: string) {
+  const failures: TtsAttemptFailure[] = [];
+
+  for (const provider of providerAttempts(primary)) {
+    try {
+      return await streamWithProvider(provider, text, failures);
+    } catch (error) {
+      console.warn("TTS_STREAM_PROVIDER_FALLBACK", provider, error);
+      failures.push({ provider, status: errorStatus(error) });
+    }
+  }
+
+  return new Response("TTS provider failed", {
+    status: 502,
+    headers: {
+      "Content-Type": "text/plain; charset=utf-8",
+      ...diagnosticHeaders(primary, failures),
+    },
+  });
+}
+
 export async function POST(req: Request) {
   const provider = resolveTtsProvider();
 
@@ -256,12 +397,15 @@ export async function POST(req: Request) {
       return json({ audio: null, mimeType: "audio/mpeg", provider: "browser" });
     }
 
-    if (provider === "edge") return json(await synthesizeWithEdge(textToSpeak));
-    if (provider === "openai") return json(await synthesizeWithOpenAI(textToSpeak));
-    if (provider === "elevenlabs") return json(await synthesizeWithElevenLabs(textToSpeak));
-    if (provider === "edge-local") return json(await synthesizeWithEdgeLocal(textToSpeak));
+    const { result, failures } = await synthesizeWithFallback(provider, textToSpeak);
 
-    return json({ audio: null, mimeType: "audio/mpeg", provider: "browser" });
+    return json(
+      result,
+      200,
+      result.provider === "browser"
+        ? diagnosticHeaders(provider, failures)
+        : diagnosticHeaders(result.provider, failures),
+    );
   } catch (error) {
     console.error("TTS_ERROR", error);
     return NextResponse.json(
@@ -289,46 +433,7 @@ export async function GET(req: Request) {
   }
 
   try {
-    if (provider === "elevenlabs") {
-      return streamUpstreamAudio(await requestElevenLabsAudio(textToSpeak), "elevenlabs");
-    }
-
-    if (provider === "openai") {
-      return streamUpstreamAudio(await requestOpenAiAudio(textToSpeak), "openai");
-    }
-
-    if (provider === "edge-local") {
-      const result = await synthesizeWithEdgeLocal(textToSpeak);
-
-      if (!result.audio) return new Response(null, { status: 204 });
-
-      return new Response(Buffer.from(result.audio, "base64"), {
-        headers: audioHeaders("edge-local"),
-      });
-    }
-
-    const tts = new EdgeTTS();
-    const stream = new ReadableStream<Uint8Array>({
-      async start(controller) {
-        try {
-          for await (const chunk of tts.synthesizeStream(
-            escapeXml(textToSpeak),
-            process.env.EDGE_TTS_VOICE || "id-ID-GadisNeural",
-            edgeOptions(),
-          )) {
-            controller.enqueue(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
-          }
-          controller.close();
-        } catch (error) {
-          console.error("TTS_STREAM_ERROR", error);
-          controller.error(error);
-        }
-      },
-    });
-
-    return new Response(stream, {
-      headers: audioHeaders("edge"),
-    });
+    return await streamWithFallback(provider, textToSpeak);
   } catch (error) {
     console.error("TTS_STREAM_ERROR", error);
     return new Response("TTS provider failed", {
