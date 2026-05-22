@@ -1,5 +1,17 @@
 export const avalonEmotions = ["happy", "shy", "angry", "sad", "neutral"] as const;
-export const avalonMotions = ["idle", "wave", "nod", "jump"] as const;
+export const avalonMotions = [
+  "idle",
+  "listen",
+  "think",
+  "explain",
+  "wave",
+  "nod",
+  "disagree",
+  "jump",
+  "tease",
+  "comfort",
+  "surprise",
+] as const;
 
 export type AvalonEmotion = (typeof avalonEmotions)[number];
 export type AvalonMotion = (typeof avalonMotions)[number];

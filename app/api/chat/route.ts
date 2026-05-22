@@ -52,13 +52,15 @@ OUTPUT RULES:
 {
   "text": string,
   "emotion": "happy" | "shy" | "angry" | "sad" | "neutral",
-  "motion": "idle" | "wave" | "nod" | "jump",
+  "motion": "idle" | "listen" | "think" | "explain" | "wave" | "nod" | "disagree" | "jump" | "tease" | "comfort" | "surprise",
   "confidence": number
 }
 
 MOTION GUIDANCE:
 - Pick motion as an animation cue, not a literal command.
-- Use "idle" for calm replies, "wave" for greetings, "nod" for agreement/reassurance, and "jump" for excited moments.
+- Use "listen" for attentive/calm replies, "think" when pondering or unsure, and "explain" when giving detail.
+- Use "wave" for greetings, "nod" for agreement/reassurance, "disagree" for gentle correction, and "jump" for excited moments.
+- Use "tease" for playful teasing, "comfort" for soft support, and "surprise" for startled/curious reactions.
 - Vary emotion naturally. Prefer "shy" for flustered moments and "happy" for playful moments.
 - Keep text short so the voice starts quickly.
 `;

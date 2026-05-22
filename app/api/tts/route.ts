@@ -36,6 +36,88 @@ function edgeOptions() {
   };
 }
 
+function audioHeaders(provider: TtsProvider) {
+  return {
+    "Content-Type": "audio/mpeg",
+    "Cache-Control": "no-store",
+    "X-TTS-Provider": provider,
+  };
+}
+
+function openAiPayload(text: string) {
+  return {
+    model: process.env.OPENAI_TTS_MODEL || "gpt-4o-mini-tts",
+    voice: process.env.OPENAI_TTS_VOICE || "coral",
+    input: text,
+    response_format: "mp3",
+    instructions:
+      process.env.OPENAI_TTS_INSTRUCTIONS ||
+      "Speak in a soft, shy, cheerful Indonesian anime companion style.",
+  };
+}
+
+async function requestOpenAiAudio(text: string) {
+  const apiKey = process.env.OPENAI_API_KEY;
+  if (!apiKey) throw new Error("Missing OPENAI_API_KEY");
+
+  const response = await fetch("https://api.openai.com/v1/audio/speech", {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${apiKey}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify(openAiPayload(text)),
+  });
+
+  if (!response.ok) throw new Error(`OpenAI TTS failed: ${response.status}`);
+  return response;
+}
+
+function elevenLabsPayload(text: string) {
+  return {
+    text,
+    model_id: process.env.ELEVENLABS_MODEL || "eleven_multilingual_v2",
+    voice_settings: {
+      stability: Number(process.env.ELEVENLABS_STABILITY || "0.42"),
+      similarity_boost: Number(process.env.ELEVENLABS_SIMILARITY_BOOST || "0.78"),
+      style: Number(process.env.ELEVENLABS_STYLE || "0.45"),
+      speed: Number(process.env.ELEVENLABS_SPEED || "1"),
+      use_speaker_boost: process.env.ELEVENLABS_SPEAKER_BOOST !== "false",
+    },
+  };
+}
+
+async function requestElevenLabsAudio(text: string) {
+  const apiKey = process.env.ELEVENLABS_API_KEY;
+  const voiceId = process.env.ELEVENLABS_VOICE_ID;
+
+  if (!apiKey) throw new Error("Missing ELEVENLABS_API_KEY");
+  if (!voiceId) throw new Error("Missing ELEVENLABS_VOICE_ID");
+
+  const response = await fetch(
+    `https://api.elevenlabs.io/v1/text-to-speech/${voiceId}?output_format=mp3_44100_128`,
+    {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "xi-api-key": apiKey,
+      },
+      body: JSON.stringify(elevenLabsPayload(text)),
+    },
+  );
+
+  if (!response.ok) throw new Error(`ElevenLabs TTS failed: ${response.status}`);
+  return response;
+}
+
+function streamUpstreamAudio(response: Response, provider: TtsProvider) {
+  if (!response.body) throw new Error(`${provider} TTS returned an empty body`);
+
+  return new Response(response.body, {
+    headers: audioHeaders(provider),
+  });
+}
+
 function escapeXml(text: string) {
   return text
     .replace(/&/g, "&amp;")
@@ -46,27 +128,7 @@ function escapeXml(text: string) {
 }
 
 async function synthesizeWithOpenAI(text: string): Promise<TtsResult> {
-  const apiKey = process.env.OPENAI_API_KEY;
-  if (!apiKey) throw new Error("Missing OPENAI_API_KEY");
-
-  const response = await fetch("https://api.openai.com/v1/audio/speech", {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${apiKey}`,
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify({
-      model: process.env.OPENAI_TTS_MODEL || "gpt-4o-mini-tts",
-      voice: process.env.OPENAI_TTS_VOICE || "coral",
-      input: text,
-      response_format: "mp3",
-      instructions:
-        process.env.OPENAI_TTS_INSTRUCTIONS ||
-        "Speak in a soft, shy, cheerful Indonesian anime companion style.",
-    }),
-  });
-
-  if (!response.ok) throw new Error(`OpenAI TTS failed: ${response.status}`);
+  const response = await requestOpenAiAudio(text);
 
   return {
     audio: toBase64(await response.arrayBuffer()),
@@ -92,28 +154,7 @@ async function synthesizeWithEdge(text: string): Promise<TtsResult> {
 }
 
 async function synthesizeWithElevenLabs(text: string): Promise<TtsResult> {
-  const apiKey = process.env.ELEVENLABS_API_KEY;
-  const voiceId = process.env.ELEVENLABS_VOICE_ID;
-
-  if (!apiKey) throw new Error("Missing ELEVENLABS_API_KEY");
-  if (!voiceId) throw new Error("Missing ELEVENLABS_VOICE_ID");
-
-  const response = await fetch(
-    `https://api.elevenlabs.io/v1/text-to-speech/${voiceId}?output_format=mp3_44100_128`,
-    {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "xi-api-key": apiKey,
-      },
-      body: JSON.stringify({
-        text,
-        model_id: process.env.ELEVENLABS_MODEL || "eleven_multilingual_v2",
-      }),
-    },
-  );
-
-  if (!response.ok) throw new Error(`ElevenLabs TTS failed: ${response.status}`);
+  const response = await requestElevenLabsAudio(text);
 
   return {
     audio: toBase64(await response.arrayBuffer()),
@@ -179,33 +220,53 @@ export async function GET(req: Request) {
   const textToSpeak = stripStageDirections(parsed.data.text);
   const provider = (process.env.TTS_PROVIDER || "edge") as TtsProvider;
 
-  if (!textToSpeak || provider !== "edge") {
+  if (!textToSpeak || provider === "none") {
     return new Response(null, { status: 204 });
   }
 
-  const tts = new EdgeTTS();
-  const stream = new ReadableStream<Uint8Array>({
-    async start(controller) {
-      try {
-        for await (const chunk of tts.synthesizeStream(
-          escapeXml(textToSpeak),
-          process.env.EDGE_TTS_VOICE || "id-ID-GadisNeural",
-          edgeOptions(),
-        )) {
-          controller.enqueue(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
-        }
-        controller.close();
-      } catch (error) {
-        console.error("TTS_STREAM_ERROR", error);
-        controller.error(error);
-      }
-    },
-  });
+  try {
+    if (provider === "elevenlabs") {
+      return streamUpstreamAudio(await requestElevenLabsAudio(textToSpeak), "elevenlabs");
+    }
 
-  return new Response(stream, {
-    headers: {
-      "Content-Type": "audio/mpeg",
-      "Cache-Control": "no-store",
-    },
-  });
+    if (provider === "openai") {
+      return streamUpstreamAudio(await requestOpenAiAudio(textToSpeak), "openai");
+    }
+
+    if (provider === "edge-local") {
+      const result = await synthesizeWithEdgeLocal(textToSpeak);
+
+      if (!result.audio) return new Response(null, { status: 204 });
+
+      return new Response(Buffer.from(result.audio, "base64"), {
+        headers: audioHeaders("edge-local"),
+      });
+    }
+
+    const tts = new EdgeTTS();
+    const stream = new ReadableStream<Uint8Array>({
+      async start(controller) {
+        try {
+          for await (const chunk of tts.synthesizeStream(
+            escapeXml(textToSpeak),
+            process.env.EDGE_TTS_VOICE || "id-ID-GadisNeural",
+            edgeOptions(),
+          )) {
+            controller.enqueue(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+          }
+          controller.close();
+        } catch (error) {
+          console.error("TTS_STREAM_ERROR", error);
+          controller.error(error);
+        }
+      },
+    });
+
+    return new Response(stream, {
+      headers: audioHeaders("edge"),
+    });
+  } catch (error) {
+    console.error("TTS_STREAM_ERROR", error);
+    return new Response("TTS provider failed", { status: 502 });
+  }
 }

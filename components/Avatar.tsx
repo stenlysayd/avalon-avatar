@@ -82,6 +82,33 @@ interface AvatarTransform {
   y: number;
 }
 
+interface AvatarCue {
+  emotion: AvalonResponse["emotion"];
+  motion: AvalonResponse["motion"];
+  startedAt: number;
+  expiresAt: number;
+}
+
+interface EmotionTargets {
+  brow: number;
+  cheek: number;
+  eyeOpen: number;
+  mouthForm: number;
+}
+
+interface MotionTargets {
+  headX: number;
+  headY: number;
+  headZ: number;
+  bodyX: number;
+  bodyY: number;
+  bodyZ: number;
+  arm: number;
+  armSwing: number;
+  bob: number;
+  pace: number;
+}
+
 const INITIAL_MESSAGE: ChatBubble = {
   id: "hello",
   role: "assistant",
@@ -102,6 +129,14 @@ const ACTIVE_MODEL_KEY = "avalon-active-model-id";
 const AVATAR_TRANSFORM_KEY = "avalon-avatar-transform";
 const SAMPLE_MODEL_ID = "sample";
 const DEFAULT_TRANSFORM: AvatarTransform = { scale: 1, x: 0, y: 0 };
+const DEFAULT_CUE: AvatarCue = {
+  emotion: "shy",
+  motion: "idle",
+  startedAt: 0,
+  expiresAt: 0,
+};
+const MOTION_CUE_DURATION_MS = 8_000;
+const THINKING_CUE_DURATION_MS = 10_000;
 const TRANSFORM_LIMITS = {
   minScale: 0.6,
   maxScale: 1.9,
@@ -120,18 +155,47 @@ const DEFAULT_CAPABILITIES: ModelCapabilities = {
 };
 
 const EXPRESSION_HINTS: Record<AvalonResponse["emotion"], string[]> = {
-  neutral: ["neutral", "normal", "default", "f00", "00"],
-  happy: ["happy", "smile", "joy", "f01", "01"],
-  shy: ["shy", "blush", "tere", "embarrass", "f02", "02"],
-  angry: ["angry", "mad", "pout", "f03", "03"],
-  sad: ["sad", "cry", "down", "f04", "04"],
+  neutral: ["neutral", "normal", "default", "m00", "f00", "00"],
+  happy: ["happy", "smile", "joy", "laugh", "egao", "warai", "m01", "f01", "01"],
+  shy: ["shy", "blush", "tere", "hazukashi", "embarrass", "照", "m02", "f02", "02"],
+  angry: ["angry", "mad", "pout", "ikari", "m03", "f03", "03"],
+  sad: ["sad", "cry", "down", "namida", "m04", "f04", "04"],
 };
 
 const MOTION_HINTS: Record<AvalonResponse["motion"], string[]> = {
   idle: ["idle", "wait", "breath"],
-  wave: ["wave", "hello", "greet", "tap", "body"],
-  nod: ["nod", "yes", "agree", "tap", "body"],
-  jump: ["jump", "happy", "excited", "tap", "body"],
+  listen: ["idle", "listen", "wait", "breath", "loop"],
+  think: ["think", "thinking", "ponder", "idle", "wait", "tap", "body", "special"],
+  explain: ["talk", "speak", "explain", "present", "tap", "body", "motion"],
+  wave: ["wave", "hello", "greet", "hi", "tap", "body"],
+  nod: ["nod", "yes", "agree", "ok", "tap", "body"],
+  disagree: ["no", "deny", "shake", "pout", "angry", "tap", "body"],
+  jump: ["jump", "happy", "excited", "surprise", "tap", "body"],
+  tease: ["laugh", "smile", "happy", "tease", "wink", "tap", "body"],
+  comfort: ["nod", "yes", "idle", "gentle", "soft", "body"],
+  surprise: ["surprise", "shock", "jump", "tap", "body"],
+};
+
+const EMOTION_TARGETS: Record<AvalonResponse["emotion"], EmotionTargets> = {
+  neutral: { brow: 0, cheek: 0, eyeOpen: 1, mouthForm: 0 },
+  happy: { brow: 0.32, cheek: 0.25, eyeOpen: 0.92, mouthForm: 0.75 },
+  shy: { brow: 0.18, cheek: 0.55, eyeOpen: 0.86, mouthForm: 0.35 },
+  angry: { brow: -0.55, cheek: 0.12, eyeOpen: 0.96, mouthForm: -0.45 },
+  sad: { brow: -0.28, cheek: 0, eyeOpen: 0.78, mouthForm: -0.35 },
+};
+
+const MOTION_TARGETS: Record<AvalonResponse["motion"], MotionTargets> = {
+  idle: { headX: 0, headY: 0, headZ: 0, bodyX: 0, bodyY: 0, bodyZ: 0, arm: 0, armSwing: 0.1, bob: 0.5, pace: 1.2 },
+  listen: { headX: 0, headY: -2.5, headZ: -2, bodyX: 0.8, bodyY: 0, bodyZ: -1, arm: 0.05, armSwing: 0.12, bob: 0.45, pace: 1.35 },
+  think: { headX: -4, headY: -5, headZ: 4, bodyX: -2, bodyY: 0.4, bodyZ: 2.5, arm: 0.5, armSwing: 0.22, bob: 0.3, pace: 1.8 },
+  explain: { headX: 2, headY: 0.5, headZ: -1.5, bodyX: 3, bodyY: 0.2, bodyZ: -1.5, arm: 0.45, armSwing: 0.52, bob: 0.8, pace: 2.8 },
+  wave: { headX: 3, headY: 1, headZ: -2, bodyX: 4, bodyY: 0.1, bodyZ: -2, arm: 0.9, armSwing: 0.8, bob: 0.9, pace: 3.4 },
+  nod: { headX: 0, headY: 4, headZ: 0, bodyX: 0, bodyY: 0.2, bodyZ: 0, arm: 0.1, armSwing: 0.16, bob: 1.2, pace: 3.2 },
+  disagree: { headX: -5, headY: -1, headZ: 3, bodyX: -3, bodyY: 0, bodyZ: 2, arm: -0.15, armSwing: 0.32, bob: 0.55, pace: 2.6 },
+  jump: { headX: 2, headY: 5, headZ: -3, bodyX: 4, bodyY: 0.8, bodyZ: -3, arm: 0.85, armSwing: 0.75, bob: 1.8, pace: 4.4 },
+  tease: { headX: 6, headY: -1, headZ: -5, bodyX: 4, bodyY: 0.1, bodyZ: -4, arm: 0.38, armSwing: 0.45, bob: 0.7, pace: 2.7 },
+  comfort: { headX: -1, headY: -1.5, headZ: 1.5, bodyX: -1, bodyY: 0, bodyZ: 1, arm: 0.22, armSwing: 0.18, bob: 0.4, pace: 1.4 },
+  surprise: { headX: -3, headY: 5, headZ: 5, bodyX: -4, bodyY: 0.4, bodyZ: 3, arm: 0.75, armSwing: 0.62, bob: 1.4, pace: 3.8 },
 };
 
 const MIME_BY_EXTENSION: Record<string, string> = {
@@ -486,6 +550,7 @@ export default function Avatar() {
   const nextIdleMotionAtRef = useRef(0);
   const uploadedObjectUrlsRef = useRef<string[]>([]);
   const capabilitiesRef = useRef<ModelCapabilities>(DEFAULT_CAPABILITIES);
+  const cueRef = useRef<AvatarCue>(DEFAULT_CUE);
   const transformRef = useRef<AvatarTransform>(DEFAULT_TRANSFORM);
   const dragRef = useRef({
     active: false,
@@ -715,6 +780,8 @@ export default function Avatar() {
     capabilitiesRef.current = capabilities;
     setModelCapabilities(capabilities);
     setModelLabel(label);
+    const expression = findExpression(cueRef.current.emotion);
+    if (expression) loadedModel.expression?.(expression);
     setModelLoaded(true);
     scheduleNextIdleMotion();
   }
@@ -897,21 +964,64 @@ export default function Avatar() {
     return expressions[fallbackIndex[emotion] % expressions.length] ?? expressions[0];
   }
 
-  function playMotionByHints(hints: string[]) {
+  function isIdleMotionGroup(group: string) {
+    const name = group.toLowerCase();
+    return ["idle", "wait", "loop", "breath"].some((hint) => name.includes(hint));
+  }
+
+  function playMotionByHints(hints: string[], preferAction = false) {
     const model = modelRef.current;
     const motions = capabilitiesRef.current.motions;
     const groups = Object.keys(motions).filter((group) => motions[group] > 0);
 
     if (!model || !groups.length) return;
 
+    const matchedGroups = groups.filter((group) => {
+      const name = group.toLowerCase();
+      return hints.some((hint) => name.includes(hint));
+    });
+    const actionGroups = groups.filter((group) => !isIdleMotionGroup(group));
+    const idleGroups = groups.filter(isIdleMotionGroup);
+
     const matchedGroup =
+      (preferAction && matchedGroups.find((group) => !isIdleMotionGroup(group))) ||
+      matchedGroups[0] ||
+      (preferAction && actionGroups[Math.floor(Math.random() * actionGroups.length)]) ||
+      idleGroups[0] ||
       groups.find((group) => {
         const name = group.toLowerCase();
-        return hints.some((hint) => name.includes(hint));
-      }) || groups.find((group) => group.toLowerCase().includes("idle")) || groups[0];
+        return name.includes("body") || name.includes("tap");
+      }) ||
+      groups[0];
 
     const count = motions[matchedGroup] || 1;
     model.motion?.(matchedGroup, Math.floor(Math.random() * count));
+  }
+
+  function setAvatarCue(
+    emotion: AvalonResponse["emotion"],
+    motion: AvalonResponse["motion"],
+    duration = MOTION_CUE_DURATION_MS,
+  ) {
+    const now = performance.now();
+    cueRef.current = {
+      emotion,
+      motion,
+      startedAt: now,
+      expiresAt: now + duration,
+    };
+
+    const expression = findExpression(emotion);
+    if (expression) modelRef.current?.expression?.(expression);
+  }
+
+  function applyThinkingCue() {
+    setAvatarCue("neutral", "think", THINKING_CUE_DURATION_MS);
+    playMotionByHints(MOTION_HINTS.think, true);
+  }
+
+  function setCoreParams(ids: string[], value: number) {
+    ids.forEach((id) => setCoreParam(id, value));
   }
 
   function animateAvatar() {
@@ -923,18 +1033,71 @@ export default function Avatar() {
     const t = now / 1000;
     const pointer = pointerRef.current;
     const thinkingWeight = loadingRef.current ? 1 : 0;
+    const speakingWeight = speakingRef.current ? 1 : 0;
+    const cue = cueRef.current;
+    const expired = now > cue.expiresAt;
+    const motionKey = loadingRef.current
+      ? "think"
+      : speakingRef.current && (cue.motion === "idle" || cue.motion === "listen")
+        ? "explain"
+        : expired
+          ? "idle"
+          : cue.motion;
+    const emotionKey = loadingRef.current && cue.emotion === "neutral" ? "shy" : cue.emotion;
+    const motion = MOTION_TARGETS[motionKey];
+    const emotion = EMOTION_TARGETS[emotionKey];
+    const talkBeat = Math.sin(t * motion.pace);
+    const slowBeat = Math.sin(t * 0.85);
+    const nodBeat = motionKey === "nod" ? Math.abs(Math.sin(t * motion.pace)) * 5 : 0;
+    const jumpBeat = motionKey === "jump" || motionKey === "surprise"
+      ? Math.abs(Math.sin(t * motion.pace)) * motion.bob
+      : Math.sin(t * motion.pace) * motion.bob * 0.25;
+    const speakingGesture = speakingWeight * Math.sin(t * 4.2) * 1.7;
+    const actionEnergy = expired && !loadingRef.current && !speakingRef.current ? 0.35 : 1;
 
-    setCoreParam("ParamAngleX", pointer.x * 10 + Math.sin(t * 0.9) * 3);
-    setCoreParam("ParamAngleY", -pointer.y * 6 + Math.sin(t * 0.7) * 2);
-    setCoreParam("ParamAngleZ", Math.sin(t * 0.55) * 2);
-    setCoreParam("ParamBodyAngleX", pointer.x * 4 + Math.sin(t * 0.4) * 1.5);
-    setCoreParam("ParamEyeBallX", pointer.x * 0.45);
-    setCoreParam("ParamEyeBallY", -pointer.y * 0.35);
-    setCoreParam("ParamBreath", 0.5 + Math.sin(t * 1.8) * 0.25);
-    setCoreParam("ParamCheek", Math.max(thinkingWeight * 0.4, 0));
+    setCoreParam(
+      "ParamAngleX",
+      pointer.x * 9 + motion.headX * actionEnergy + talkBeat * 1.7 + speakingGesture,
+    );
+    setCoreParam(
+      "ParamAngleY",
+      -pointer.y * 5 + motion.headY * actionEnergy + slowBeat * 1.8 + nodBeat,
+    );
+    setCoreParam(
+      "ParamAngleZ",
+      motion.headZ * actionEnergy + Math.sin(t * 1.15) * 2.2 + speakingGesture * 0.35,
+    );
+    setCoreParam(
+      "ParamBodyAngleX",
+      pointer.x * 3 + motion.bodyX * actionEnergy + Math.sin(t * 0.75) * 1.4,
+    );
+    setCoreParam("ParamBodyAngleY", motion.bodyY + jumpBeat + thinkingWeight * 0.35);
+    setCoreParam(
+      "ParamBodyAngleZ",
+      motion.bodyZ * actionEnergy + Math.sin(t * 0.65) * 1.1,
+    );
+    setCoreParam("ParamEyeBallX", clamp(pointer.x * 0.42 + motion.headX / 35, -1, 1));
+    setCoreParam("ParamEyeBallY", clamp(-pointer.y * 0.32 + motion.headY / 35, -1, 1));
+    setCoreParam("ParamBreath", 0.5 + Math.sin(t * 1.8) * 0.25 + speakingWeight * 0.08);
+    setCoreParam("ParamCheek", Math.max(emotion.cheek, thinkingWeight * 0.28));
+    setCoreParam("ParamMouthForm", emotion.mouthForm + speakingWeight * 0.18);
+    setCoreParams(["ParamEyeLOpen", "ParamEyeROpen"], emotion.eyeOpen);
+    setCoreParams(["ParamBrowLY", "ParamBrowRY"], emotion.brow);
+    setCoreParams(["ParamBrowLForm", "ParamBrowRForm"], emotion.brow * 0.8);
+
+    const armGesture =
+      motion.arm * actionEnergy +
+      Math.sin(t * motion.pace + 0.4) * motion.armSwing +
+      speakingWeight * Math.sin(t * 5.1) * 0.22;
+    setCoreParams(["ParamArmLA", "ParamArmL", "ParamHandL"], armGesture);
+    setCoreParams(["ParamArmRA", "ParamArmR", "ParamHandR"], -armGesture * 0.78);
+    setCoreParams(["ParamArmLB", "ParamShoulderL"], armGesture * 0.55);
+    setCoreParams(["ParamArmRB", "ParamShoulderR"], -armGesture * 0.45);
 
     if (!speakingRef.current && now > nextIdleMotionAtRef.current) {
-      playMotionByHints(["idle", "tap", "body", "wait"]);
+      const idleMotion = Math.random() > 0.45 ? "listen" : "idle";
+      setAvatarCue(cue.emotion, idleMotion, 4_500);
+      playMotionByHints(MOTION_HINTS[idleMotion]);
       scheduleNextIdleMotion();
     }
   }
@@ -985,20 +1148,17 @@ export default function Avatar() {
   }
 
   function applyAvatarCue(response: AvalonResponse) {
-    const model = modelRef.current;
-    if (!model) return;
-
-    const expression = findExpression(response.emotion);
-    if (expression) model.expression?.(expression);
+    setAvatarCue(response.emotion, response.motion);
 
     if (response.motion !== "idle") {
-      playMotionByHints(MOTION_HINTS[response.motion]);
+      playMotionByHints(MOTION_HINTS[response.motion], true);
     }
   }
 
   async function playAudioElement(audio: HTMLAudioElement) {
     stopSpeech();
 
+    audio.preload = "auto";
     audioRef.current = audio;
 
     audio.onplay = () => {
@@ -1173,6 +1333,7 @@ export default function Avatar() {
     setInputText("");
     setMessages(nextMessages);
     setIsLoadingAI(true);
+    applyThinkingCue();
 
     try {
       const response = await fetch("/api/chat", {
@@ -1206,6 +1367,7 @@ export default function Avatar() {
       void speak(assistantText);
     } catch (error) {
       console.error("CHAT_CLIENT_ERROR", error);
+      applyAvatarCue(FALLBACK_RESPONSE);
       setMessages((current) => [
         ...current,
         {
@@ -1215,6 +1377,7 @@ export default function Avatar() {
           emotion: FALLBACK_RESPONSE.emotion,
         },
       ]);
+      void speak(FALLBACK_RESPONSE.text);
     } finally {
       setIsLoadingAI(false);
     }

@@ -68,6 +68,13 @@ OPENAI_TTS_VOICE=coral
 TTS_PROVIDER=elevenlabs
 ELEVENLABS_API_KEY=...
 ELEVENLABS_VOICE_ID=...
+ELEVENLABS_MODEL=eleven_multilingual_v2
+ELEVENLABS_STABILITY=0.42
+ELEVENLABS_SIMILARITY_BOOST=0.78
+ELEVENLABS_STYLE=0.45
+ELEVENLABS_SPEED=1
+ELEVENLABS_SPEAKER_BOOST=true
+NEXT_PUBLIC_TTS_MODE=stream
 ```
 
 ```bash
@@ -97,6 +104,8 @@ NEXT_PUBLIC_LIVE2D_MODEL_URL=https://example.com/avalon.model3.json
 Uploaded zip models are saved in the browser's IndexedDB after a successful load, so the same browser can pick them again from the model dropdown without reuploading. The saved zip stays on that device/browser profile; it is not uploaded to GitHub, Vercel, or your server.
 
 The avatar can also be dragged on the canvas. Use the slider button in the app to fine-tune size and X/Y position; those settings are saved in `localStorage`.
+
+Avalon maps each chat response to an expression and gesture cue, then tries the closest motion group in the loaded model. If a custom model has expression names or motion groups for things like think, talk, wave, nod, surprise, smile, blush, or angry, the app will use them; otherwise it falls back to procedural head, body, eye, mouth, and arm parameters where the model exposes those Live2D params.
 
 If a custom model still appears too large or too small across all users, tune the default multiplier without code changes:
 
