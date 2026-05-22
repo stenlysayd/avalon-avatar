@@ -7,6 +7,7 @@ Avalon Avatar is a web-based anime AI companion prototype. It combines:
 - Groq chat responses with a strict Avalon JSON contract
 - Optional server-side TTS providers
 - Browser speech fallback for Vercel deployments
+- Temporary Live2D zip loading in the browser without extracting files to disk
 
 ## Setup
 
@@ -35,13 +36,26 @@ NEXT_PUBLIC_LIVE2D_MODEL_URL=https://example.com/model.model3.json
 
 ## TTS Modes
 
-The app works on Vercel without a Python server by falling back to browser `speechSynthesis`.
+The recommended free setup is Edge TTS with the Indonesian female `GadisNeural` voice. It runs through a small serverless package, does not use your GPU, and does not download a local AI model.
 
 ```bash
+TTS_PROVIDER=edge
+EDGE_TTS_VOICE=id-ID-GadisNeural
+EDGE_TTS_RATE=+8%
+EDGE_TTS_PITCH=+18Hz
+NEXT_PUBLIC_TTS_MODE=stream
+```
+
+Use this only when you want the lowest delay and accept browser-dependent voice quality:
+
+```bash
+NEXT_PUBLIC_TTS_MODE=browser
 TTS_PROVIDER=none
 ```
 
-Optional server TTS modes:
+`NEXT_PUBLIC_TTS_MODE=stream` uses `/api/tts?text=...` so audio can begin as chunks arrive. `server` keeps the older JSON/base64 path for compatibility.
+
+Optional paid or limited-free server TTS modes:
 
 ```bash
 TTS_PROVIDER=openai
@@ -70,6 +84,16 @@ pip install -r requirements.txt
 uvicorn tts_server:app --host 127.0.0.1 --port 5002
 ```
 
+## Live2D Models
+
+The upload button in the app can load a local Live2D Cubism 3/4 zip at runtime. The zip must contain a `.model3.json` file and its referenced `.moc3`, textures, expressions, and motions. The model is loaded through temporary browser object URLs, so it does not permanently extract anything onto your SSD and does not need to be committed to GitHub.
+
+For production, host your chosen Avalon model somewhere stable and set:
+
+```bash
+NEXT_PUBLIC_LIVE2D_MODEL_URL=https://example.com/avalon.model3.json
+```
+
 ## Scripts
 
 ```bash
@@ -82,5 +106,5 @@ npm run typecheck
 ## Notes
 
 - Do not commit API keys. `.env*` files are ignored, while `.env.example` is intentionally tracked.
-- The default Live2D model is a public Haru sample. Replace it with your own Avalon model through `NEXT_PUBLIC_LIVE2D_MODEL_URL`.
+- The default Live2D model is a public Haru sample. Replace it through the upload button or `NEXT_PUBLIC_LIVE2D_MODEL_URL`.
 - `/api/chat` includes basic input validation and in-memory rate limiting. For serious public traffic, add durable rate limiting such as Upstash Redis or Vercel Firewall rules.

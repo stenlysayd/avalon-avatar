@@ -2,6 +2,7 @@ import type { NextConfig } from "next";
 import path from "path";
 
 const nextConfig: NextConfig = {
+  serverExternalPackages: ["@andresaya/edge-tts"],
   webpack: (config) => {
     // Cari path absolut ke folder node_modules utama
     const rootNodeModules = path.join(process.cwd(), 'node_modules');

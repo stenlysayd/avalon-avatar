@@ -1,4 +1,6 @@
 import { NextResponse } from "next/server";
+import { Buffer } from "node:buffer";
+import { Constants, EdgeTTS } from "@andresaya/edge-tts";
 import { z } from "zod";
 import { stripStageDirections } from "@/lib/avalon";
 
@@ -9,7 +11,7 @@ const ttsRequestSchema = z.object({
   text: z.string().min(1).max(500),
 });
 
-type TtsProvider = "none" | "edge-local" | "openai" | "elevenlabs";
+type TtsProvider = "none" | "edge" | "edge-local" | "openai" | "elevenlabs";
 
 interface TtsResult {
   audio: string | null;
@@ -23,6 +25,24 @@ function toBase64(buffer: ArrayBuffer) {
 
 function json(result: TtsResult, status = 200) {
   return NextResponse.json(result, { status });
+}
+
+function edgeOptions() {
+  return {
+    rate: process.env.EDGE_TTS_RATE || "+8%",
+    pitch: process.env.EDGE_TTS_PITCH || "+18Hz",
+    volume: process.env.EDGE_TTS_VOLUME || "+0%",
+    outputFormat: Constants.OUTPUT_FORMAT.AUDIO_24KHZ_96KBITRATE_MONO_MP3,
+  };
+}
+
+function escapeXml(text: string) {
+  return text
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&apos;");
 }
 
 async function synthesizeWithOpenAI(text: string): Promise<TtsResult> {
@@ -52,6 +72,22 @@ async function synthesizeWithOpenAI(text: string): Promise<TtsResult> {
     audio: toBase64(await response.arrayBuffer()),
     mimeType: "audio/mpeg",
     provider: "openai",
+  };
+}
+
+async function synthesizeWithEdge(text: string): Promise<TtsResult> {
+  const tts = new EdgeTTS();
+
+  await tts.synthesize(escapeXml(text), process.env.EDGE_TTS_VOICE || "id-ID-GadisNeural", {
+    ...edgeOptions(),
+  });
+
+  const audio = tts.toBuffer() as Buffer;
+
+  return {
+    audio: audio.toString("base64"),
+    mimeType: "audio/mpeg",
+    provider: "edge",
   };
 }
 
@@ -112,12 +148,13 @@ export async function POST(req: Request) {
   try {
     const { text } = ttsRequestSchema.parse(await req.json());
     const textToSpeak = stripStageDirections(text);
-    const provider = (process.env.TTS_PROVIDER || "none") as TtsProvider;
+    const provider = (process.env.TTS_PROVIDER || "edge") as TtsProvider;
 
     if (!textToSpeak) {
       return json({ audio: null, mimeType: "audio/mpeg", provider: "browser" });
     }
 
+    if (provider === "edge") return json(await synthesizeWithEdge(textToSpeak));
     if (provider === "openai") return json(await synthesizeWithOpenAI(textToSpeak));
     if (provider === "elevenlabs") return json(await synthesizeWithElevenLabs(textToSpeak));
     if (provider === "edge-local") return json(await synthesizeWithEdgeLocal(textToSpeak));
@@ -127,4 +164,48 @@ export async function POST(req: Request) {
     console.error("TTS_ERROR", error);
     return json({ audio: null, mimeType: "audio/mpeg", provider: "browser" });
   }
+}
+
+export async function GET(req: Request) {
+  const { searchParams } = new URL(req.url);
+  const parsed = ttsRequestSchema.safeParse({
+    text: searchParams.get("text") || "",
+  });
+
+  if (!parsed.success) {
+    return new Response("Invalid text", { status: 400 });
+  }
+
+  const textToSpeak = stripStageDirections(parsed.data.text);
+  const provider = (process.env.TTS_PROVIDER || "edge") as TtsProvider;
+
+  if (!textToSpeak || provider !== "edge") {
+    return new Response(null, { status: 204 });
+  }
+
+  const tts = new EdgeTTS();
+  const stream = new ReadableStream<Uint8Array>({
+    async start(controller) {
+      try {
+        for await (const chunk of tts.synthesizeStream(
+          escapeXml(textToSpeak),
+          process.env.EDGE_TTS_VOICE || "id-ID-GadisNeural",
+          edgeOptions(),
+        )) {
+          controller.enqueue(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+        }
+        controller.close();
+      } catch (error) {
+        console.error("TTS_STREAM_ERROR", error);
+        controller.error(error);
+      }
+    },
+  });
+
+  return new Response(stream, {
+    headers: {
+      "Content-Type": "audio/mpeg",
+      "Cache-Control": "no-store",
+    },
+  });
 }

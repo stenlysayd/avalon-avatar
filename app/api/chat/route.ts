@@ -57,10 +57,10 @@ OUTPUT RULES:
 }
 
 MOTION GUIDANCE:
-- Use "idle" most of the time.
-- Use "wave" for greetings.
-- Use "nod" for agreement or reassurance.
-- Use "jump" only for excited moments.
+- Pick motion as an animation cue, not a literal command.
+- Use "idle" for calm replies, "wave" for greetings, "nod" for agreement/reassurance, and "jump" for excited moments.
+- Vary emotion naturally. Prefer "shy" for flustered moments and "happy" for playful moments.
+- Keep text short so the voice starts quickly.
 `;
 
 let groqClient: Groq | null = null;
