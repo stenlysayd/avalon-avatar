@@ -63,6 +63,7 @@ const LIVE2D_MODEL_URL =
   "https://cdn.jsdelivr.net/gh/guansss/pixi-live2d-display/test/assets/haru/haru_greeter_t03.model3.json";
 
 const TTS_MODE = process.env.NEXT_PUBLIC_TTS_MODE || "stream";
+const AVATAR_SCALE_MULTIPLIER = Number(process.env.NEXT_PUBLIC_AVATAR_SCALE || "1");
 
 const DEFAULT_CAPABILITIES: ModelCapabilities = {
   expressions: ["f00", "f01", "f02", "f03", "f04", "f05", "f06", "f07"],
@@ -114,6 +115,10 @@ const FEMALE_VOICE_HINTS = [
 ];
 
 const MALE_VOICE_HINTS = ["ardi", "andika", "male", "pria", "laki", "david", "mark", "budi"];
+
+function clamp(value: number, min: number, max: number) {
+  return Math.min(Math.max(value, min), max);
+}
 
 function createId() {
   return globalThis.crypto?.randomUUID?.() || `${Date.now()}-${Math.random()}`;
@@ -394,9 +399,7 @@ export default function Avatar() {
       const model = modelRef.current;
       if (!model) return;
 
-      model.x = window.innerWidth / 2;
-      model.y = window.innerHeight / 2 + (window.innerWidth < 720 ? 80 : 110);
-      model.scale.set(window.innerWidth < 720 ? 0.2 : 0.25);
+      fitModelToViewport(model);
     };
 
     window.addEventListener("resize", handleResize);
@@ -453,6 +456,21 @@ export default function Avatar() {
     nextIdleMotionAtRef.current = performance.now() + 5_000 + Math.random() * 7_000;
   }
 
+  function fitModelToViewport(model: Live2DModelInstance) {
+    const bounds = model.getLocalBounds();
+    const naturalWidth = Math.max(bounds.width, 1);
+    const naturalHeight = Math.max(bounds.height, 1);
+    const isMobile = window.innerWidth < 720;
+    const widthBudget = window.innerWidth * (isMobile ? 0.82 : 0.42);
+    const heightBudget = window.innerHeight * (isMobile ? 0.54 : 0.62);
+    const rawScale = Math.min(widthBudget / naturalWidth, heightBudget / naturalHeight);
+    const scale = clamp(rawScale * AVATAR_SCALE_MULTIPLIER, 0.02, isMobile ? 0.38 : 0.48);
+
+    model.scale.set(scale);
+    model.x = window.innerWidth / 2;
+    model.y = window.innerHeight * (isMobile ? 0.46 : 0.47);
+  }
+
   async function loadLive2DModel(
     source: string,
     label: string,
@@ -474,12 +492,9 @@ export default function Avatar() {
       previousModel.destroy();
     }
 
-    loadedModel.anchor.set(0.5, 0.5);
-    loadedModel.scale.set(window.innerWidth < 720 ? 0.22 : 0.28);
-    loadedModel.x = window.innerWidth / 2;
-    loadedModel.y = window.innerHeight / 2 + (window.innerWidth < 720 ? 72 : 92);
-
     app.stage.addChild(loadedModel);
+    loadedModel.anchor.set(0.5, 0.5);
+    fitModelToViewport(loadedModel);
     modelRef.current = loadedModel;
     capabilitiesRef.current = capabilities;
     setModelCapabilities(capabilities);

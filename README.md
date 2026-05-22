@@ -94,6 +94,12 @@ For production, host your chosen Avalon model somewhere stable and set:
 NEXT_PUBLIC_LIVE2D_MODEL_URL=https://example.com/avalon.model3.json
 ```
 
+If a custom model still appears too large or too small, tune it without code changes:
+
+```bash
+NEXT_PUBLIC_AVATAR_SCALE=0.85
+```
+
 ## Scripts
 
 ```bash
