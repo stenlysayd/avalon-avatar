@@ -44,12 +44,52 @@ const LIVE2D_MODEL_URL =
   process.env.NEXT_PUBLIC_LIVE2D_MODEL_URL ||
   "https://cdn.jsdelivr.net/gh/guansss/pixi-live2d-display/test/assets/haru/haru_greeter_t03.model3.json";
 
+const FEMALE_VOICE_HINTS = [
+  "gadis",
+  "female",
+  "wanita",
+  "perempuan",
+  "zira",
+  "jenny",
+  "aria",
+  "siti",
+  "ayunda",
+  "damayanti",
+  "google bahasa indonesia",
+];
+
+const MALE_VOICE_HINTS = ["ardi", "andika", "male", "pria", "laki", "david", "mark", "budi"];
+
 function createId() {
   return globalThis.crypto?.randomUUID?.() || `${Date.now()}-${Math.random()}`;
 }
 
 function cleanAssistantText(text: string) {
   return text.trim().replace(/\n{3,}/g, "\n\n");
+}
+
+function voiceScore(voice: SpeechSynthesisVoice) {
+  const name = voice.name.toLowerCase();
+  const lang = voice.lang.toLowerCase();
+  let score = 0;
+
+  if (lang === "id-id") score += 35;
+  if (lang.startsWith("id")) score += 20;
+  if (name.includes("gadis")) score += 100;
+  if (name.includes("natural")) score += 10;
+  if (FEMALE_VOICE_HINTS.some((hint) => name.includes(hint))) score += 45;
+  if (MALE_VOICE_HINTS.some((hint) => name.includes(hint))) score -= 120;
+
+  return score;
+}
+
+function pickFemaleVoice(voices: SpeechSynthesisVoice[]) {
+  const scored = voices
+    .map((voice) => ({ voice, score: voiceScore(voice) }))
+    .filter(({ score }) => score > 0)
+    .sort((a, b) => b.score - a.score);
+
+  return scored[0]?.voice ?? null;
 }
 
 export default function Avatar() {
@@ -68,6 +108,7 @@ export default function Avatar() {
   const [isSpeaking, setIsSpeaking] = useState(false);
   const [isLoadingAI, setIsLoadingAI] = useState(false);
   const [voiceEnabled, setVoiceEnabled] = useState(true);
+  const [availableVoices, setAvailableVoices] = useState<SpeechSynthesisVoice[]>([]);
 
   const apiMessages = useMemo<ChatMessage[]>(
     () =>
@@ -164,6 +205,21 @@ export default function Avatar() {
     }
   }, [messages, isLoadingAI]);
 
+  useEffect(() => {
+    if (!("speechSynthesis" in window)) return;
+
+    const syncVoices = () => {
+      setAvailableVoices(window.speechSynthesis.getVoices());
+    };
+
+    syncVoices();
+    window.speechSynthesis.addEventListener("voiceschanged", syncVoices);
+
+    return () => {
+      window.speechSynthesis.removeEventListener("voiceschanged", syncVoices);
+    };
+  }, []);
+
   function setMouth(value: number) {
     modelRef.current?.internalModel?.coreModel?.setParameterValueById("ParamMouthOpenY", value);
   }
@@ -258,24 +314,36 @@ export default function Avatar() {
     await audio.play();
   }
 
-  function speakInBrowser(text: string) {
+  async function speakInBrowser(text: string) {
     stopSpeech();
 
     const textToSpeak = stripStageDirections(text);
     if (!textToSpeak || !("speechSynthesis" in window)) return;
 
+    let voices = availableVoices.length ? availableVoices : window.speechSynthesis.getVoices();
+
+    if (!voices.length) {
+      voices = await new Promise<SpeechSynthesisVoice[]>((resolve) => {
+        const timeout = window.setTimeout(() => resolve(window.speechSynthesis.getVoices()), 350);
+        const handleVoicesChanged = () => {
+          window.clearTimeout(timeout);
+          window.speechSynthesis.removeEventListener("voiceschanged", handleVoicesChanged);
+          resolve(window.speechSynthesis.getVoices());
+        };
+
+        window.speechSynthesis.addEventListener("voiceschanged", handleVoicesChanged);
+      });
+      setAvailableVoices(voices);
+    }
+
     const utterance = new SpeechSynthesisUtterance(textToSpeak);
-    const voices = window.speechSynthesis.getVoices();
-    const selectedVoice =
-      voices.find((voice) => voice.name.includes("Gadis")) ||
-      voices.find((voice) => voice.lang === "id-ID" && voice.name.includes("Natural")) ||
-      voices.find((voice) => voice.lang === "id-ID");
+    const selectedVoice = pickFemaleVoice(voices);
 
     if (selectedVoice) utterance.voice = selectedVoice;
 
     utterance.lang = selectedVoice?.lang || "id-ID";
-    utterance.pitch = 0.95;
-    utterance.rate = 0.88;
+    utterance.pitch = selectedVoice ? 1.08 : 1.24;
+    utterance.rate = 0.9;
 
     utterance.onstart = () => {
       setIsSpeaking(true);
@@ -306,7 +374,7 @@ export default function Avatar() {
       console.warn("TTS_FALLBACK", error);
     }
 
-    speakInBrowser(text);
+    void speakInBrowser(text);
   }
 
   async function handleChat() {
