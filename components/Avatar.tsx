@@ -1,251 +1,481 @@
-'use client';
+"use client";
 
-import { useEffect, useRef, useState } from 'react';
-import * as PIXI from 'pixi.js';
+import { SendHorizontal, Volume2, VolumeX } from "lucide-react";
+import { useEffect, useMemo, useRef, useState } from "react";
+import * as PIXI from "pixi.js";
+import {
+  FALLBACK_RESPONSE,
+  stripStageDirections,
+  type AvalonResponse,
+  type ChatMessage,
+} from "@/lib/avalon";
 
-interface Message {
-  role: 'user' | 'ai';
-  text: string;
+type Live2DModelInstance = PIXI.DisplayObject & {
+  anchor: { set: (x: number, y?: number) => void };
+  scale: { set: (value: number) => void };
+  expression?: (name: string) => void;
+  motion?: (group: string, index?: number) => void;
+  internalModel?: {
+    coreModel?: {
+      setParameterValueById: (id: string, value: number) => void;
+    };
+  };
+};
+
+type ChatBubble = ChatMessage & {
+  id: string;
+  emotion?: AvalonResponse["emotion"];
+};
+
+interface TtsResponse {
+  audio: string | null;
+  mimeType?: string;
+  provider?: string;
+}
+
+const INITIAL_MESSAGE: ChatBubble = {
+  id: "hello",
+  role: "assistant",
+  content: "Halo... aku Avalon. Senang ketemu kamu lagi. (senyum malu)",
+  emotion: "shy",
+};
+
+const LIVE2D_MODEL_URL =
+  process.env.NEXT_PUBLIC_LIVE2D_MODEL_URL ||
+  "https://cdn.jsdelivr.net/gh/guansss/pixi-live2d-display/test/assets/haru/haru_greeter_t03.model3.json";
+
+function createId() {
+  return globalThis.crypto?.randomUUID?.() || `${Date.now()}-${Math.random()}`;
+}
+
+function cleanAssistantText(text: string) {
+  return text.trim().replace(/\n{3,}/g, "\n\n");
 }
 
 export default function Avatar() {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const chatContainerRef = useRef<HTMLDivElement>(null);
-  
-  const [model, setModel] = useState<any>(null);
-  const [modelLoaded, setModelLoaded] = useState(false);
-  const [inputText, setInputText] = useState("");
-  const [messages, setMessages] = useState<Message[]>([]);
-  const [isSpeaking, setIsSpeaking] = useState(false);
-  const [isLoadingAI, setIsLoadingAI] = useState(false);
-  
+  const modelRef = useRef<Live2DModelInstance | null>(null);
+  const audioRef = useRef<HTMLAudioElement | null>(null);
+  const audioContextRef = useRef<AudioContext | null>(null);
+  const analyserRef = useRef<AnalyserNode | null>(null);
   const mouthRef = useRef({ current: 0, target: 0, lastUpdate: 0 });
 
-  // 1. SETUP LIVE2D
+  const [modelLoaded, setModelLoaded] = useState(false);
+  const [modelError, setModelError] = useState<string | null>(null);
+  const [inputText, setInputText] = useState("");
+  const [messages, setMessages] = useState<ChatBubble[]>([INITIAL_MESSAGE]);
+  const [isSpeaking, setIsSpeaking] = useState(false);
+  const [isLoadingAI, setIsLoadingAI] = useState(false);
+  const [voiceEnabled, setVoiceEnabled] = useState(true);
+
+  const apiMessages = useMemo<ChatMessage[]>(
+    () =>
+      messages
+        .filter((message) => message.id !== INITIAL_MESSAGE.id)
+        .map((message) => ({
+          role: message.role,
+          content: message.content,
+        })),
+    [messages],
+  );
+
   useEffect(() => {
     if (!canvasRef.current) return;
 
+    let disposed = false;
     const app = new PIXI.Application({
       view: canvasRef.current,
       autoStart: true,
       resizeTo: window,
       backgroundAlpha: 0,
+      antialias: true,
     });
 
-    const loadScript = (src: string) => {
-      return new Promise((resolve) => {
-        if (document.querySelector(`script[src="${src}"]`)) { resolve(true); return; }
-        const script = document.createElement('script');
+    const loadScript = (src: string) =>
+      new Promise<void>((resolve, reject) => {
+        if (document.querySelector(`script[src="${src}"]`)) {
+          resolve();
+          return;
+        }
+
+        const script = document.createElement("script");
         script.src = src;
-        script.onload = () => resolve(true);
-        script.onerror = () => resolve(false);
+        script.async = true;
+        script.onload = () => resolve();
+        script.onerror = () => reject(new Error(`Failed to load ${src}`));
         document.body.appendChild(script);
       });
-    };
 
-    const initLive2D = async () => {
-      (window as any).PIXI = PIXI;
+    async function initLive2D() {
       try {
-        await loadScript('/live2dcubismcore.min.js');
-        const { Live2DModel } = await import('pixi-live2d-display/cubism4');
+        (window as typeof window & { PIXI?: typeof PIXI }).PIXI = PIXI;
+        await loadScript("/live2dcubismcore.min.js");
+
+        const { Live2DModel } = await import("pixi-live2d-display/cubism4");
         Live2DModel.registerTicker(PIXI.Ticker);
 
-        // Menggunakan model Haru sebagai contoh
-        const modelUrl = 'https://cdn.jsdelivr.net/gh/guansss/pixi-live2d-display/test/assets/haru/haru_greeter_t03.model3.json';
-        const loadedModel = await Live2DModel.from(modelUrl);
+        const loadedModel = (await Live2DModel.from(LIVE2D_MODEL_URL)) as Live2DModelInstance;
+        if (disposed) return;
 
-        loadedModel.x = window.innerWidth / 2;
-        loadedModel.y = window.innerHeight / 2 + 100;
         loadedModel.anchor.set(0.5, 0.5);
-        loadedModel.scale.set(0.25);
-        
-        app.stage.addChild(loadedModel as any);
-        setModel(loadedModel);
-        setModelLoaded(true);
-        setMessages([{ role: 'ai', text: 'Halo! Aku Avalon. Senang bertemu kamu lagi!' }]);
+        loadedModel.scale.set(window.innerWidth < 720 ? 0.2 : 0.25);
+        loadedModel.x = window.innerWidth / 2;
+        loadedModel.y = window.innerHeight / 2 + (window.innerWidth < 720 ? 80 : 110);
 
+        app.stage.addChild(loadedModel);
+        modelRef.current = loadedModel;
+        setModelLoaded(true);
       } catch (error) {
-        console.error("Gagal init Live2D:", error);
+        console.error("LIVE2D_ERROR", error);
+        setModelError("Model Live2D gagal dimuat.");
       }
-    };
+    }
 
     initLive2D();
-    return () => { app.destroy(true, true); };
+
+    const handleResize = () => {
+      const model = modelRef.current;
+      if (!model) return;
+
+      model.x = window.innerWidth / 2;
+      model.y = window.innerHeight / 2 + (window.innerWidth < 720 ? 80 : 110);
+      model.scale.set(window.innerWidth < 720 ? 0.2 : 0.25);
+    };
+
+    window.addEventListener("resize", handleResize);
+
+    return () => {
+      disposed = true;
+      window.removeEventListener("resize", handleResize);
+      PIXI.Ticker.shared.remove(animateMouth);
+      audioRef.current?.pause();
+      audioContextRef.current?.close().catch(() => undefined);
+      app.destroy(true, true);
+      modelRef.current = null;
+    };
+    // animateMouth reads mutable refs only; cleanup must remove this first-render ticker callback.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   useEffect(() => {
     if (chatContainerRef.current) {
       chatContainerRef.current.scrollTop = chatContainerRef.current.scrollHeight;
     }
-  }, [messages]);
+  }, [messages, isLoadingAI]);
 
-  // --- 2. SISTEM SUARA (GadisNeural) ---
-  
-// Di dalam file Avatar.tsx, cari fungsi speakText dan ganti dengan ini:
-
-const speakText = (text: string) => {
-  // 1. Batalkan suara yang sedang berjalan
-  window.speechSynthesis.cancel();
-
-  // 2. FILTER: Hapus teks di dalam kurung agar tidak dibaca (contoh: (nunduk) tidak akan disuarakan)
-  const textToSpeak = text.replace(/\(.*?\)/g, '').trim();
-
-  const utterance = new SpeechSynthesisUtterance(textToSpeak);
-  
-  // 3. FORCE: Gunakan 1 voice saja (GadisNeural)
-  const voices = window.speechSynthesis.getVoices();
-  
-  // Mencari suara Gadis (Microsoft Edge/Chrome Online)
-  const selectedVoice = voices.find(v => v.name.includes('Gadis')) || 
-                        voices.find(v => v.lang === 'id-ID' && v.name.includes('Natural'));
-
-  if (selectedVoice) {
-    utterance.voice = selectedVoice;
-  } else {
-    // Jika tidak ketemu, cari suara perempuan Indonesia manapun
-    const femaleIndo = voices.find(v => v.lang === 'id-ID' && (v.name.includes('Female') || v.name.includes('Google')));
-    if (femaleIndo) utterance.voice = femaleIndo;
+  function setMouth(value: number) {
+    modelRef.current?.internalModel?.coreModel?.setParameterValueById("ParamMouthOpenY", value);
   }
 
-  // 4. TUNING: Sesuaikan nada untuk karakter pemalu
-  utterance.pitch = 0.9;  // Sedikit rendah agar tidak terlalu melengking (lebih tenang)
-  utterance.rate = 0.85;   // Bicaranya agak lambat karena dia ragu-ragu/pemalu
+  function animateMouth() {
+    const now = performance.now();
+    const analyser = analyserRef.current;
 
-  utterance.onstart = () => {
-    setIsSpeaking(true);
-    if (PIXI.Ticker.shared) PIXI.Ticker.shared.add(animateMouth);
-  };
+    if (analyser) {
+      const data = new Uint8Array(analyser.frequencyBinCount);
+      analyser.getByteFrequencyData(data);
+      const average = data.reduce((sum, value) => sum + value, 0) / data.length;
+      mouthRef.current.target = Math.min(0.85, average / 150);
+    } else if (now - mouthRef.current.lastUpdate > 80) {
+      mouthRef.current.target = Math.random() * 0.65;
+      mouthRef.current.lastUpdate = now;
+    }
 
-  utterance.onend = () => {
+    mouthRef.current.current += (mouthRef.current.target - mouthRef.current.current) * 0.3;
+    setMouth(mouthRef.current.current);
+  }
+
+  function resetMouth() {
+    mouthRef.current.current = 0;
+    mouthRef.current.target = 0;
+    setMouth(0);
+  }
+
+  function stopSpeech() {
+    audioRef.current?.pause();
+    window.speechSynthesis?.cancel();
+    PIXI.Ticker.shared.remove(animateMouth);
+    analyserRef.current = null;
     setIsSpeaking(false);
-    if (PIXI.Ticker.shared) PIXI.Ticker.shared.remove(animateMouth);
     resetMouth();
-  };
+  }
 
-  window.speechSynthesis.speak(utterance);
-};
+  function applyAvatarCue(response: AvalonResponse) {
+    const model = modelRef.current;
+    if (!model) return;
 
-  // Animasi Mulut (Sinkronisasi sederhana)
-  const animateMouth = () => {
-    if (model?.internalModel?.coreModel) {
-      const core = model.internalModel.coreModel;
-      const now = performance.now();
-      if (now - mouthRef.current.lastUpdate > 80) {
-        mouthRef.current.target = Math.random() * 0.7;
-        mouthRef.current.lastUpdate = now;
+    const expressionByEmotion: Record<AvalonResponse["emotion"], string> = {
+      neutral: "f00",
+      happy: "f01",
+      shy: "f02",
+      angry: "f03",
+      sad: "f04",
+    };
+
+    model.expression?.(expressionByEmotion[response.emotion]);
+
+    if (response.motion !== "idle") {
+      const motionIndex: Record<Exclude<AvalonResponse["motion"], "idle">, number> = {
+        wave: 0,
+        nod: 1,
+        jump: 0,
+      };
+      model.motion?.("Tap", motionIndex[response.motion]);
+    }
+  }
+
+  async function playServerAudio(audioBase64: string, mimeType = "audio/mpeg") {
+    stopSpeech();
+
+    const audio = new Audio(`data:${mimeType};base64,${audioBase64}`);
+    audioRef.current = audio;
+
+    audio.onplay = () => {
+      setIsSpeaking(true);
+
+      try {
+        const AudioContextConstructor = window.AudioContext || window.webkitAudioContext;
+        const context = audioContextRef.current ?? new AudioContextConstructor();
+        audioContextRef.current = context;
+
+        const analyser = context.createAnalyser();
+        analyser.fftSize = 256;
+        const source = context.createMediaElementSource(audio);
+        source.connect(analyser);
+        analyser.connect(context.destination);
+        analyserRef.current = analyser;
+      } catch {
+        analyserRef.current = null;
       }
-      mouthRef.current.current += (mouthRef.current.target - mouthRef.current.current) * 0.3;
-      core.setParameterValueById('ParamMouthOpenY', mouthRef.current.current);
+
+      PIXI.Ticker.shared.add(animateMouth);
+    };
+
+    audio.onended = stopSpeech;
+    audio.onerror = stopSpeech;
+
+    await audio.play();
+  }
+
+  function speakInBrowser(text: string) {
+    stopSpeech();
+
+    const textToSpeak = stripStageDirections(text);
+    if (!textToSpeak || !("speechSynthesis" in window)) return;
+
+    const utterance = new SpeechSynthesisUtterance(textToSpeak);
+    const voices = window.speechSynthesis.getVoices();
+    const selectedVoice =
+      voices.find((voice) => voice.name.includes("Gadis")) ||
+      voices.find((voice) => voice.lang === "id-ID" && voice.name.includes("Natural")) ||
+      voices.find((voice) => voice.lang === "id-ID");
+
+    if (selectedVoice) utterance.voice = selectedVoice;
+
+    utterance.lang = selectedVoice?.lang || "id-ID";
+    utterance.pitch = 0.95;
+    utterance.rate = 0.88;
+
+    utterance.onstart = () => {
+      setIsSpeaking(true);
+      PIXI.Ticker.shared.add(animateMouth);
+    };
+    utterance.onend = stopSpeech;
+    utterance.onerror = stopSpeech;
+
+    window.speechSynthesis.speak(utterance);
+  }
+
+  async function speak(text: string) {
+    if (!voiceEnabled) return;
+
+    try {
+      const response = await fetch("/api/tts", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ text }),
+      });
+      const data = (await response.json()) as TtsResponse;
+
+      if (data.audio) {
+        await playServerAudio(data.audio, data.mimeType);
+        return;
+      }
+    } catch (error) {
+      console.warn("TTS_FALLBACK", error);
     }
-  };
 
-  const resetMouth = () => {
-    if (model?.internalModel?.coreModel) {
-      model.internalModel.coreModel.setParameterValueById('ParamMouthOpenY', 0);
-    }
-  };
+    speakInBrowser(text);
+  }
 
-  // --- 3. LOGIKA CHAT ---
-  const handleChat = async () => {
-    if (!inputText.trim() || isLoadingAI) return;
+  async function handleChat() {
+    const userText = inputText.trim();
+    if (!userText || isLoadingAI) return;
 
-    const userMsg = inputText;
+    const userMessage: ChatBubble = {
+      id: createId(),
+      role: "user",
+      content: userText,
+    };
+    const nextMessages = [...messages, userMessage];
+
     setInputText("");
-    
-    const newHistory = [...messages, { role: 'user', text: userMsg }];
-    setMessages(newHistory as Message[]);
+    setMessages(nextMessages);
     setIsLoadingAI(true);
 
     try {
-      // Format history untuk Gemini (Mulai dari user)
-      let apiHistory = newHistory.map(msg => ({
-        role: msg.role === 'user' ? 'user' : 'model',
-        parts: [{ text: msg.text }]
-      }));
-
-      const firstUserIndex = apiHistory.findIndex(msg => msg.role === 'user');
-      if (firstUserIndex !== -1) apiHistory = apiHistory.slice(firstUserIndex);
-
-      const response = await fetch('/api/chat', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ history: apiHistory.slice(-10) }),
+      const response = await fetch("/api/chat", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          messages: [
+            ...apiMessages,
+            {
+              role: "user",
+              content: userText,
+            },
+          ].slice(-12),
+        }),
       });
 
-      const data = await response.json();
-      
-      if (data.reply) {
-        setMessages(prev => [...prev, { role: 'ai', text: data.reply }]);
-        if (model) model.motion('TapBody'); // Reaksi gerakan
-        speakText(data.reply); // Putar suara GadisNeural
-      }
+      const data = (await response.json()) as AvalonResponse;
+      const result = response.ok ? data : { ...FALLBACK_RESPONSE, ...data };
+      const assistantText = cleanAssistantText(result.text || FALLBACK_RESPONSE.text);
+
+      applyAvatarCue(result);
+      setMessages((current) => [
+        ...current,
+        {
+          id: createId(),
+          role: "assistant",
+          content: assistantText,
+          emotion: result.emotion,
+        },
+      ]);
+      void speak(assistantText);
     } catch (error) {
-      console.error("Chat Error:", error);
+      console.error("CHAT_CLIENT_ERROR", error);
+      setMessages((current) => [
+        ...current,
+        {
+          id: createId(),
+          role: "assistant",
+          content: FALLBACK_RESPONSE.text,
+          emotion: FALLBACK_RESPONSE.emotion,
+        },
+      ]);
     } finally {
       setIsLoadingAI(false);
     }
-  };
+  }
 
   return (
-    <div className="relative w-full h-screen bg-gray-950 overflow-hidden font-sans">
-      {/* Background Anime Style (Optional) */}
-      <div className="absolute inset-0 bg-gradient-to-b from-cyan-900/20 to-black z-0" />
-      
+    <div className="relative h-screen w-full overflow-hidden bg-[#101114] font-sans text-white">
+      <div className="absolute inset-0 bg-[radial-gradient(circle_at_50%_10%,rgba(34,211,238,0.16),transparent_34%),linear-gradient(180deg,#14171f_0%,#08090b_100%)]" />
       <canvas ref={canvasRef} className="absolute inset-0 z-10" />
 
-      {/* UI Layer */}
-      <div className="absolute inset-0 z-20 flex flex-col justify-end pb-12 px-4 items-center pointer-events-none">
-        
-        {/* Chat Box */}
-        <div ref={chatContainerRef} className="w-full max-w-lg max-h-[50vh] overflow-y-auto p-4 space-y-4 pointer-events-auto mb-6 scroll-smooth">
-          {messages.map((msg, idx) => (
-            <div key={idx} className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}>
-              <div className={`max-w-[85%] px-4 py-3 rounded-2xl text-sm md:text-base shadow-xl backdrop-blur-md 
-                ${msg.role === 'user' 
-                  ? 'bg-cyan-600/90 text-white rounded-br-none' 
-                  : 'bg-white/90 text-gray-800 rounded-bl-none border border-cyan-200'}`}>
-                {msg.text}
-              </div>
+      <div className="pointer-events-none absolute inset-0 z-20 flex flex-col justify-end px-3 pb-5 sm:px-6 sm:pb-8">
+        <div className="mx-auto flex w-full max-w-2xl flex-col gap-3">
+          <div className="flex items-center justify-between text-xs text-white/65">
+            <span>{modelLoaded ? "Avalon online" : "Memuat Avalon"}</span>
+            <button
+              type="button"
+              onClick={() => {
+                if (voiceEnabled) stopSpeech();
+                setVoiceEnabled((enabled) => !enabled);
+              }}
+              className="pointer-events-auto inline-flex h-9 w-9 items-center justify-center rounded-full border border-white/15 bg-black/35 text-white/80 backdrop-blur transition hover:bg-white/10"
+              aria-label={voiceEnabled ? "Matikan suara" : "Nyalakan suara"}
+              title={voiceEnabled ? "Matikan suara" : "Nyalakan suara"}
+            >
+              {voiceEnabled ? <Volume2 size={17} /> : <VolumeX size={17} />}
+            </button>
+          </div>
+
+          <div
+            ref={chatContainerRef}
+            className="pointer-events-auto max-h-[44vh] overflow-y-auto rounded-md border border-white/10 bg-black/25 p-3 shadow-2xl backdrop-blur-md sm:p-4"
+          >
+            <div className="space-y-3">
+              {messages.map((message) => (
+                <div
+                  key={message.id}
+                  className={`flex ${message.role === "user" ? "justify-end" : "justify-start"}`}
+                >
+                  <div
+                    className={`max-w-[86%] rounded-md px-3 py-2 text-sm leading-relaxed shadow-lg sm:text-base ${
+                      message.role === "user"
+                        ? "bg-cyan-500 text-black"
+                        : "border border-white/15 bg-white/90 text-zinc-900"
+                    }`}
+                  >
+                    {message.content}
+                  </div>
+                </div>
+              ))}
+
+              {isLoadingAI && (
+                <div className="flex justify-start">
+                  <div className="rounded-md border border-white/15 bg-white/80 px-3 py-2 text-sm text-zinc-800">
+                    Avalon sedang berpikir...
+                  </div>
+                </div>
+              )}
+
+              {modelError && (
+                <div className="rounded-md border border-amber-300/30 bg-amber-400/15 px-3 py-2 text-sm text-amber-100">
+                  {modelError}
+                </div>
+              )}
             </div>
-          ))}
-          {isLoadingAI && (
-            <div className="flex justify-start">
-              <div className="bg-white/50 text-gray-800 px-4 py-2 rounded-2xl animate-pulse text-xs">Avalon sedang berpikir...</div>
+          </div>
+
+          <form
+            className="pointer-events-auto flex items-center gap-2 rounded-md border border-white/12 bg-zinc-950/80 p-2 shadow-2xl backdrop-blur-xl"
+            onSubmit={(event) => {
+              event.preventDefault();
+              void handleChat();
+            }}
+          >
+            <input
+              type="text"
+              value={inputText}
+              maxLength={600}
+              onChange={(event) => setInputText(event.target.value)}
+              placeholder="Ngobrol sama Avalon..."
+              className="min-w-0 flex-1 bg-transparent px-3 py-2 text-sm text-white outline-none placeholder:text-white/45 sm:text-base"
+            />
+            <button
+              type="submit"
+              disabled={isLoadingAI || !inputText.trim()}
+              className="inline-flex h-11 w-11 shrink-0 items-center justify-center rounded-md bg-cyan-400 text-black transition hover:bg-cyan-300 disabled:cursor-not-allowed disabled:bg-zinc-700 disabled:text-zinc-400"
+              aria-label="Kirim pesan"
+              title="Kirim pesan"
+            >
+              <SendHorizontal size={19} />
+            </button>
+          </form>
+
+          {isSpeaking && (
+            <div className="mx-auto text-xs tracking-wide text-cyan-200/80">
+              Avalon sedang bicara...
             </div>
           )}
         </div>
-
-        {/* Input Area */}
-        <div className="w-full max-w-lg pointer-events-auto">
-          <div className="bg-white/10 backdrop-blur-2xl border border-white/20 p-2 rounded-full shadow-2xl flex gap-2 items-center pl-6 pr-2">
-            <input 
-              type="text" 
-              value={inputText} 
-              onChange={(e) => setInputText(e.target.value)}
-              placeholder="Ketik pesan..."
-              className="flex-1 bg-transparent text-white placeholder-gray-400 focus:outline-none"
-              onKeyDown={(e) => e.key === 'Enter' && handleChat()}
-            />
-            <button 
-              onClick={handleChat} 
-              disabled={isLoadingAI}
-              className="bg-cyan-500 hover:bg-cyan-400 text-white p-3 rounded-full transition-all active:scale-90 disabled:grayscale"
-            >
-              <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" className="w-5 h-5">
-                <path d="M3.478 2.405a.75.75 0 00-.926.94l2.432 7.905H13.5a.75.75 0 010 1.5H4.984l-2.432 7.905a.75.75 0 00.926.94 60.519 60.519 0 0018.445-8.986.75.75 0 000-1.218A60.517 60.517 0 003.478 2.405z" />
-              </svg>
-            </button>
-          </div>
-        </div>
       </div>
 
-      {/* Loading Screen */}
-      {!modelLoaded && (
-        <div className="absolute inset-0 flex flex-col items-center justify-center z-50 bg-black text-white">
-          <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-cyan-500 mb-4"></div>
-          <p className="text-cyan-400 tracking-widest animate-pulse">MEMUAT AVALON...</p>
+      {!modelLoaded && !modelError && (
+        <div className="absolute inset-0 z-30 flex items-center justify-center bg-black/70 text-sm tracking-[0.25em] text-cyan-200">
+          MEMUAT AVALON
         </div>
       )}
     </div>
   );
+}
+
+declare global {
+  interface Window {
+    webkitAudioContext: typeof AudioContext;
+  }
 }

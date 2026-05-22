@@ -1,58 +1,199 @@
-import { NextResponse } from 'next/server';
-import { GoogleGenerativeAI } from '@google/generative-ai';
+import { NextResponse } from "next/server";
+import Groq from "groq-sdk";
+import { z } from "zod";
+import {
+  avalonEmotions,
+  avalonMotions,
+  FALLBACK_RESPONSE,
+  type ChatMessage,
+} from "@/lib/avalon";
 
-export async function POST(req: Request) {
-  try {
-    const { history } = await req.json();
-    const apiKey = process.env.GEMINI_API_KEY;
+export const runtime = "nodejs";
+export const maxDuration = 20;
 
-    if (!apiKey) {
-      return NextResponse.json({ reply: "A-anu... API Key-nya belum ada..." }, { status: 500 });
-    }
+const MAX_MESSAGE_CHARS = 600;
+const MAX_HISTORY_ITEMS = 12;
+const RATE_LIMIT_WINDOW_MS = 60_000;
+const RATE_LIMIT_MAX = 18;
 
-    const genAI = new GoogleGenerativeAI(apiKey);
-
-// route.ts
-const model = genAI.getGenerativeModel({ 
-    model: "gemini-2.0-flash", 
-    systemInstruction: `
-        Nama: Avalon.
-        Kepribadian: Gadis introvert, sangat pemalu (shy), penakut tapi tulus, dan gampang gugup kalau diajak bicara.
-        
-        Cara Bicara:
-        - Gunakan logat "gagap" pada kata pertama di situasi tertentu (Contoh: "A-anu...", "I-iya...").
-        - Sering menggunakan kata: "Umm...", "Eh..?", "Anu..", "M-maaf..".
-        - Jangan pernah bicara panjang lebar. Cukup 1-2 kalimat pendek saja.
-        - Tambahkan aksi dalam kurung untuk memperkuat kesan malu, seperti: (nunduk), (mainin ujung baju), (liat ke bawah).
-        - Gunakan bahasa "aku-kamu" yang sangat lembut.
-        
-        Contoh Respon:
-        User: "Kamu lagi apa?"
-        Avalon: "Eh..? A-aku cuma lagi... umm, nungguin kamu lewat aja. (nunduk malu)"
-    `
+const responseSchema = z.object({
+  text: z.string().min(1).max(320),
+  emotion: z.enum(avalonEmotions),
+  motion: z.enum(avalonMotions),
+  confidence: z.number().min(0).max(1),
 });
 
-    const lastMessage = history[history.length - 1]; 
-    const previousHistory = history.slice(0, -1);
+const chatMessageSchema = z.object({
+  role: z.enum(["user", "assistant"]),
+  content: z.string().min(1).max(MAX_MESSAGE_CHARS),
+});
 
-    const chat = model.startChat({
-        history: previousHistory,
-        generationConfig: {
-            maxOutputTokens: 200,
-            temperature: 0.9, // Ditingkatkan agar variasi kata "canggung" lebih alami
-            topP: 0.8,
+const requestSchema = z.object({
+  message: z.string().min(1).max(MAX_MESSAGE_CHARS).optional(),
+  messages: z.array(chatMessageSchema).max(MAX_HISTORY_ITEMS).optional(),
+  history: z.unknown().optional(),
+});
+
+const SYSTEM_PROMPT = `
+You are Avalon, a web-based anime-style AI companion.
+
+PERSONALITY:
+- shy, warm, playful, curious
+- gentle Indonesian "aku-kamu" speech
+- short natural replies, usually 1-3 sentences
+- can be slightly teasing, but never mean or aggressive
+- stage directions in parentheses are allowed, but keep them short
+
+OUTPUT RULES:
+- Reply only with valid JSON.
+- No markdown.
+- No text outside JSON.
+- Use this exact shape:
+{
+  "text": string,
+  "emotion": "happy" | "shy" | "angry" | "sad" | "neutral",
+  "motion": "idle" | "wave" | "nod" | "jump",
+  "confidence": number
+}
+
+MOTION GUIDANCE:
+- Use "idle" most of the time.
+- Use "wave" for greetings.
+- Use "nod" for agreement or reassurance.
+- Use "jump" only for excited moments.
+`;
+
+let groqClient: Groq | null = null;
+const rateBuckets = new Map<string, { count: number; resetAt: number }>();
+
+function getGroqClient() {
+  const apiKey = process.env.GROQ_API_KEY;
+
+  if (!apiKey) {
+    throw new Error("Missing GROQ_API_KEY");
+  }
+
+  groqClient ??= new Groq({ apiKey });
+  return groqClient;
+}
+
+function getClientId(req: Request) {
+  const forwardedFor = req.headers.get("x-forwarded-for");
+  return forwardedFor?.split(",")[0]?.trim() || "local";
+}
+
+function isRateLimited(clientId: string) {
+  const now = Date.now();
+  const bucket = rateBuckets.get(clientId);
+
+  if (!bucket || bucket.resetAt <= now) {
+    rateBuckets.set(clientId, { count: 1, resetAt: now + RATE_LIMIT_WINDOW_MS });
+    return false;
+  }
+
+  bucket.count += 1;
+  return bucket.count > RATE_LIMIT_MAX;
+}
+
+function normalizeLegacyHistory(history: unknown): ChatMessage[] {
+  if (!Array.isArray(history)) return [];
+
+  return history
+    .map((item): ChatMessage | null => {
+      if (!item || typeof item !== "object") return null;
+
+      const candidate = item as {
+        role?: unknown;
+        content?: unknown;
+        text?: unknown;
+        parts?: Array<{ text?: unknown }>;
+      };
+
+      const content =
+        typeof candidate.content === "string"
+          ? candidate.content
+          : typeof candidate.text === "string"
+            ? candidate.text
+            : typeof candidate.parts?.[0]?.text === "string"
+              ? candidate.parts[0].text
+              : "";
+
+      if (!content.trim()) return null;
+
+      return {
+        role: candidate.role === "model" || candidate.role === "assistant" ? "assistant" : "user",
+        content: content.slice(0, MAX_MESSAGE_CHARS),
+      };
+    })
+    .filter((message): message is ChatMessage => Boolean(message))
+    .slice(-MAX_HISTORY_ITEMS);
+}
+
+function buildMessages(payload: z.infer<typeof requestSchema>): ChatMessage[] {
+  const messages: ChatMessage[] = payload.messages?.length
+    ? payload.messages.map((message) => ({
+        role: message.role as ChatMessage["role"],
+        content: message.content,
+      }))
+    : normalizeLegacyHistory(payload.history);
+
+  if (payload.message) {
+    const appendedMessage: ChatMessage = { role: "user", content: payload.message };
+    return [...messages, appendedMessage].slice(-MAX_HISTORY_ITEMS);
+  }
+
+  return messages.slice(-MAX_HISTORY_ITEMS);
+}
+
+export async function POST(req: Request) {
+  const clientId = getClientId(req);
+
+  if (isRateLimited(clientId)) {
+    return NextResponse.json(
+      {
+        ...FALLBACK_RESPONSE,
+        text: "Umm... pelan-pelan ya. Aku perlu napas sebentar sebelum lanjut ngobrol.",
+      },
+      { status: 429 },
+    );
+  }
+
+  try {
+    const rawPayload = await req.json();
+    const payload = requestSchema.parse(rawPayload);
+    const messages = buildMessages(payload);
+    const lastMessage = messages.at(-1);
+
+    if (!lastMessage || lastMessage.role !== "user") {
+      return NextResponse.json(
+        {
+          ...FALLBACK_RESPONSE,
+          text: "A-anu... aku belum nangkep pesanmu. Coba kirim satu kalimat dulu ya.",
         },
+        { status: 400 },
+      );
+    }
+
+    const completion = await getGroqClient().chat.completions.create({
+      model: process.env.GROQ_MODEL || "llama-3.1-8b-instant",
+      temperature: 0.75,
+      response_format: { type: "json_object" },
+      messages: [
+        { role: "system", content: SYSTEM_PROMPT },
+        ...messages.map((message) => ({
+          role: message.role,
+          content: message.content,
+        })),
+      ],
     });
 
-    const result = await chat.sendMessage(lastMessage.parts[0].text);
-    const text = result.response.text();
+    const raw = completion.choices[0]?.message?.content;
+    if (!raw) throw new Error("Empty LLM response");
 
-    return NextResponse.json({ reply: text });
-
-  } catch (error: any) {
-    console.error("SERVER ERROR:", error);
-    return NextResponse.json({ 
-        reply: "Umm... m-maaf, kepalaku lagi pusing... (error teknis)" 
-    }, { status: 500 });
+    const parsed = responseSchema.parse(JSON.parse(raw));
+    return NextResponse.json(parsed);
+  } catch (error) {
+    console.error("CHAT_ERROR", error);
+    return NextResponse.json(FALLBACK_RESPONSE, { status: 503 });
   }
 }
